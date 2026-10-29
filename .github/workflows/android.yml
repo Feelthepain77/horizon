@@ -142,7 +142,7 @@ jobs:
           # compiled exporters' classes are build noise. Everything else —
           # the exporter tables, the datagen reports, the worldgen bundle —
           # is what the import brings.
-          cd ".local/horizon-client/$version"
+          cd ".local/horizon-client"
           zip -qr9 "$RUNNER_TEMP/portable-export-$version.zip" "$version" \
             -x "$version/assets/*" "$version/data/*" \
             -x "$version/classes/*" "$version/client-classes/*" \
