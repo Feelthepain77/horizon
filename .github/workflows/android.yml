@@ -40,6 +40,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The client tree (horizon-android depends on it) pulls ring via
+      # ureq/rustls; ring's build script compiles C for the Android targets
+      # even under `cargo check`, so the check legs need the NDK's clang.
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install NDK and put its toolchain on PATH
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          NDK=$(sdkmanager --list | grep -oE 'ndk;[0-9.]+' | sort -V | tail -1)
+          echo "Installing $NDK"
+          yes | sdkmanager "$NDK" > /dev/null
+          echo "$ANDROID_HOME/ndk/${NDK#ndk;}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

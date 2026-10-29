@@ -17,17 +17,32 @@ import kotlinx.coroutines.withContext
  * Canonical storage layout for game data inside the app's private storage:
  *
  * ```
- * files/game/          imported .minecraft content (versions/, assets/, libraries/)
- * files/local/         prepared resources (".local/" equivalent from a portable export)
- * files/imports/       staging dir for in-flight imports
+ * files/prepared/     the prepared resources root — a horizon-resources.json
+ *                     at its top (what the client's --resources needs). The
+ *                     desktop launcher's "Export for Android" action produces
+ *                     it after running horizon-prepare on the PC.
+ * files/home/         the game home: cwd for the client run + HORIZON_HOME.
+ *                     options.txt, saves/, logs/ and .horizon-cache are
+ *                     created there by the client itself.
+ * files/accounts/     local accounts + the per-launch session file.
+ * files/imports/      staging dir for in-flight imports.
  * ```
  *
  * Rust receives these absolute paths via `HorizonNative.configure` — no SAF
  * dance on the game side.
  */
 object StorageLayout {
-    fun gameDir(context: Context): File = File(context.filesDir, "game")
-    fun localDir(context: Context): File = File(context.filesDir, "local")
+    /** The prepared resources root (`--resources`). */
+    fun preparedDir(context: Context): File = File(context.filesDir, "prepared")
+
+    /** The game home (cwd + HORIZON_HOME). */
+    fun homeDir(context: Context): File = File(context.filesDir, "home")
+
+    /** Local accounts and the session file written per launch. */
+    fun accountsDir(context: Context): File = File(context.filesDir, "accounts")
+
+    fun sessionFile(context: Context): File = File(accountsDir(context), "session.json")
+
     fun importsDir(context: Context): File = File(context.filesDir, "imports")
 }
 
@@ -41,39 +56,36 @@ data class ImportState(
 )
 
 /**
- * Imports Minecraft: Java Edition files from user-chosen documents.
+ * Imports the **prepared resources** the client plays from.
  *
- * Horizon never downloads game files (same policy as the desktop launcher) —
- * the user supplies them from their own installation, either as:
- *  1. a **portable export zip** produced by the desktop launcher's
- *     "Export for Android" action (runs `horizon-prepare` on the PC and packs
- *     versions/ + assets/ + libraries/ + local/ — the recommended path, see
- *     PORTING.md § "Portable export format"), or
- *  2. a raw `.minecraft` folder picked with ACTION_OPEN_DOCUMENT_TREE.
+ * Horizon never downloads game files (same policy as the desktop launcher):
+ * the user runs the desktop launcher on their PC, which prepares the game
+ * data there (horizon-prepare) and packs it into a **portable export**. This
+ * manager unpacks such an export — a zip or a folder — into
+ * `files/prepared`, locating the prepared root by its
+ * `horizon-resources.json` manifest wherever the export put it.
+ *
+ * The raw `versions/`/`assets/`/`libraries/` layout is a *desktop prepare
+ * input*; the client never reads it at play time, so it is not imported.
  */
 class GameFilesManager(private val context: Context) {
 
     private val _importState = MutableStateFlow(ImportState())
     val importState: StateFlow<ImportState> = _importState
 
-    private val gameDir get() = StorageLayout.gameDir(context)
-    private val localDir get() = StorageLayout.localDir(context)
+    private val preparedDir get() = StorageLayout.preparedDir(context)
 
-    /** True when the structural minimum (versions/ + assets/ + libraries/) exists. */
-    fun looksImported(): Boolean =
-        File(gameDir, "versions").isDirectory &&
-            File(gameDir, "assets").isDirectory &&
-            File(gameDir, "libraries").isDirectory
+    /** The file that marks a directory as the prepared resources root. */
+    private val mark = "horizon-resources.json"
 
-    /** A portable export additionally carries prepared resources. */
-    fun hasPrepared(): Boolean = File(localDir, "prepared.json").isFile
+    /** True when the prepared root is importable/playable right now. */
+    fun hasPrepared(): Boolean = File(preparedDir, mark).isFile
 
-    fun importedBytes(): Long = (gameDir.walkBottomUp() + localDir.walkBottomUp())
+    fun importedBytes(): Long = preparedDir.walkBottomUp()
         .filter { it.isFile }.sumOf { it.length() }
 
     fun deleteAll() {
-        gameDir.deleteRecursively()
-        localDir.deleteRecursively()
+        preparedDir.deleteRecursively()
         StorageLayout.importsDir(context).deleteRecursively()
         _importState.value = ImportState()
     }
@@ -81,17 +93,29 @@ class GameFilesManager(private val context: Context) {
     // ------------------------------------------------------------------ zip --
 
     /**
-     * Import a portable-export zip. Entries map:
-     *  - `versions/...`, `assets/...`, `libraries/...` -> files/game/
-     *  - `local/...` or `.local/...`                   -> files/local/
-     *  - everything else (manifests, checksums)        -> files/game/
+     * Import a portable-export zip: the entry tree under the directory that
+     * holds `horizon-resources.json` (wherever in the zip it lives — the
+     * export may wrap it in a top-level folder) goes to `files/prepared`.
      */
     suspend fun importFromZip(uri: Uri): Unit = withContext(Dispatchers.IO) {
         _importState.value = ImportState(running = true)
         try {
+            // First pass: find the root prefix (shallowest directory holding
+            // the manifest). Second pass: copy everything under it.
+            var rootPrefix: String? = null
+            context.contentResolver.openInputStream(uri)!!.buffered(1 shl 16).use { input ->
+                ZipImporter(input).import { entry, _ ->
+                    // The directory part of the manifest's entry is the root
+                    // prefix ("" when the manifest sits at the zip's root).
+                    if (rootPrefix == null && entry.substringAfterLast('/') == mark) {
+                        rootPrefix = entry.substringBefore(mark)
+                    }
+                }
+            }
+            val prefix = rootPrefix ?: fail("no $mark in the export — prepare on the PC first, then Export for Android")
             context.contentResolver.openInputStream(uri)!!.buffered(1 shl 16).use { input ->
                 ZipImporter(input).import { entry, stream ->
-                    copyZipEntry(entry, stream)
+                    if (entry.startsWith(prefix)) copyEntry(entry.removePrefix(prefix), stream)
                 }
             }
             _importState.value = ImportState(running = false)
@@ -101,14 +125,15 @@ class GameFilesManager(private val context: Context) {
         }
     }
 
-    private fun copyZipEntry(name: String, stream: java.util.zip.ZipInputStream) {
-        val targetRoot: File = when {
-            name.startsWith("local/") || name.startsWith(".local/") -> localDir
-            else -> gameDir
-        }
-        val rel = name.removePrefix("local/").removePrefix(".local/")
-        val target = File(targetRoot, rel)
-        if (name.endsWith("/")) {
+    private fun fail(why: String): Nothing {
+        _importState.value = ImportState(error = why)
+        throw IllegalStateException(why)
+    }
+
+    private fun copyEntry(rel: String, stream: java.util.zip.ZipInputStream) {
+        if (rel.isBlank() || rel == "/") return
+        val target = File(preparedDir, rel)
+        if (rel.endsWith("/")) {
             target.mkdirs()
             return
         }
@@ -123,24 +148,23 @@ class GameFilesManager(private val context: Context) {
     // ----------------------------------------------------------------- tree --
 
     /**
-     * Import required subtrees (`versions/`, `assets/`, `libraries/`) from a
-     * `.minecraft` folder chosen with ACTION_OPEN_DOCUMENT_TREE.
+     * Import from a folder (ACTION_OPEN_DOCUMENT_TREE): the subtree whose
+     * directory holds `horizon-resources.json` — wherever it sits, up to a
+     * few levels deep — goes to `files/prepared`. Typically the extracted
+     * portable export; a raw `.minecraft` has no prepared root and is
+     * rejected with a clear message.
      */
     suspend fun importFromTree(uri: Uri): Unit = withContext(Dispatchers.IO) {
         _importState.value = ImportState(running = true)
         try {
             val resolver = context.contentResolver
-            val children = SafUtil.listChildren(resolver, uri)
-            val wanted = setOf("versions", "assets", "libraries")
+            val manifest = findDocumentTree(resolver, uri, 0) { it == mark }
+                ?: fail("no $mark in the folder — prepare on the PC first, then Export for Android")
+            // The manifest's parent directory is the root; copy that subtree.
             var copied = 0L
-            for (child in children) {
-                val name = SafUtil.displayName(resolver, child) ?: continue
-                if (name !in wanted) continue
-                copyDocumentTree(resolver, child, File(gameDir, name)) { bytes, file ->
-                    copied += bytes
-                    _importState.value =
-                        _importState.value.copy(bytes = copied, currentFile = file)
-                }
+            copyDocumentTree(resolver, manifest.parent!!, preparedDir) { bytes, file ->
+                copied += bytes
+                _importState.value = _importState.value.copy(bytes = copied, currentFile = file)
             }
             _importState.value = _importState.value.copy(running = false)
         } catch (e: Exception) {
@@ -149,17 +173,39 @@ class GameFilesManager(private val context: Context) {
         }
     }
 
+    /** Depth-limited search for a document whose name satisfies [want]. */
+    private fun findDocumentTree(
+        resolver: android.content.ContentResolver,
+        uri: Uri,
+        depth: Int,
+        want: (String) -> Boolean,
+    ): Uri? {
+        if (depth > 4) return null
+        for (child in SafUtil.listChildren(resolver, uri)) {
+            val name = SafUtil.displayName(resolver, child) ?: continue
+            if (want(name)) return child
+            if (SafUtil.isDirectory(resolver, child)) {
+                findDocumentTree(resolver, child, depth + 1, want)?.let { return it }
+            }
+        }
+        return null
+    }
+
     private fun copyDocumentTree(
         resolver: android.content.ContentResolver,
         document: Uri,
         targetDir: File,
         onBytes: (Long, String) -> Unit,
     ) {
-        val resolverDoc = document
         if (SafUtil.isDirectory(resolver, document)) {
             targetDir.mkdirs()
             for (child in SafUtil.listChildren(resolver, document)) {
-                copyDocumentTree(resolver, child, File(targetDir, SafUtil.displayName(resolver, child) ?: "_"), onBytes)
+                copyDocumentTree(
+                    resolver,
+                    child,
+                    File(targetDir, SafUtil.displayName(resolver, child) ?: "_"),
+                    onBytes,
+                )
             }
         } else {
             targetDir.parentFile?.mkdirs()

@@ -246,24 +246,32 @@ verification during Phase 1 — treat them as the first week's checklist.
 
 ### 6.1 `horizon-client` — the actual wiring
 
-The integration point is `GameShell` in `crates/horizon-android/src/lib.rs`:
+**Shipped.** The real client runs on Android today:
 
-1. Replace `demo::Renderer` with the client's renderer/app state. The shell
-   already provides: window creation on `resumed`, teardown on `suspended`,
-   resize handling, redraw pumping, `TouchOverlay` input, and the
-   `LaunchConfiguration` (paths, render distance, preset, username).
-2. The client's event loop presumably runs its own `EventLoop` on desktop.
-   Two options, in order of preference:
-   a. Refactor the client to expose `ClientApp` implementing winit's
-      `ApplicationHandler` — then `GameShell` just holds it and forwards
-      events (the cleanest; winit's trait makes this mechanical).
-   b. If the client's loop is monolithic, run it behind a facade that
-      translates the shell's callbacks into the client's expected calls.
-3. Feed `touch::InputAction`s into the client's existing input-binding layer
-   (the same place keyboard/mouse/dualsense inputs land) — see § 8.
-4. Limits audit: replace `Limits::default()` in `backend.rs` with the
-   client's required limits, and add an adapter feature check that logs
-   (and preset-degrades) instead of panicking on missing mobile features.
+* `horizon-client/src/game.rs` gained `pub fn run_with(args)` (a thin
+  threading of the existing `Options::read` argv parse), and the client
+  library now also compiles `game.rs` (`extern crate self as horizon_client`
+  in its lib.rs keeps its `use horizon_client::...` imports resolving), so
+  `crates/horizon-android` can drive it from `android_main`, where there is
+  no argv to read.
+* `crates/horizon-android/src/client.rs` builds the launch: `HORIZON_HOME`
+  + cwd = the game home, `HORIZON_TELEMETRY_URL=off`, then
+  `--resources <prepared root>` (see SS 7), `--render-distance`,
+  `--name`, `--session-file`. Without a prepared root it returns `Ok(false)`
+  and the shell falls back to the demo renderer.
+* Touch input is translated inside the client (`game.rs`, cfg-gated
+  `touch_input` + `Game::translate_touch`): touches become the desktop
+  events the game already understands, so no other game logic is
+  Android-aware. Keys go through `mapped_key` (the unified entry point the
+  keyboard and controllers share) because winit's `KeyEvent` cannot be
+  constructed outside winit; mouse-shaped events are constructed directly.
+  The gesture map is SS 8.
+* The client is built `--no-default-features`: no audio (no ALSA on
+  Android; sound is the cpal/Oboe workstream) and no controllers (gilrs has
+  no Android backend; the touch overlay replaces them).
+
+Desktop debugging still works: the `desktop` feature runs the demo shell
+as before, and `cargo run -p horizon-client` is unchanged.
 
 ### 6.2 Filesystem rules on Android
 
@@ -294,6 +302,14 @@ JDK 25 at prepare time. Android cannot run arbitrary JDK-25 jars (ART is not
 a JVM), and bundling a JVM in an APK is not viable. Three options, in the
 order the port should pursue them:
 
+
+**Status:** Option A is the implemented import path. The Android launcher
+imports a portable export by locating `horizon-resources.json` (the
+prepared-root manifest the client requires for `--resources`); see
+`GameFilesManager`. The desktop launcher's "Export for Android" button is
+still upstream work — until it exists, produce the export by preparing on
+the PC (`horizon-prepare`) and zipping the `.local/horizon-client/<version>`
+directory (the one containing `horizon-resources.json`).
 ### Option A — Portable export (recommended, ships first)
 
 The desktop launcher gains an **"Export for Android"** action:
@@ -333,65 +349,29 @@ need for it.
 
 ## 8. Touch overlay
 
-`crates/horizon-android/src/touch.rs` is a complete, tested state machine
-(5 unit tests) that turns winit touch events into `InputAction`s. It is
-input-intent only — no rendering, no client coupling.
+**Shipped** (in the client, `game.rs` cfg(android) `touch_input`): the zones
+are fixed fractions of the window and invisible in this version — drawing
+them belongs with the client's HUD pass. On menus, a touch is a cursor move
+plus a left click (press on start, moves in between, release on lift), so
+every screen's hit-testing and sliders work unmodified.
 
-### Layout (landscape-first, proportional to `min(w, h)`)
+In game (Screen::Playing), the gesture map:
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ [pause]        [hotbar: 9 slots, top center]      [inv][chat]│
-│ [zoom]                                                      │
-│                                                    [jump]    │
-│               look-drag zone                       [attack]   │
-│          (right of x=0.42w, below hotbar)          [sneak]    │
-│  ◉ move-stick                                     [use][pick]│
-│ (fixed base, Bedrock-style)                                   │
-└──────────────────────────────────────────────────────────────┘
-```
-
-* **Fixed-base joystick** (classic Bedrock feel): engage anywhere in the left
-  zone, stick anchored at its layout position. 50%-of-knob deadzone, clamped
-  to unit circle, y inverted (drag up = forward).
-* **Look zone**: right side; deltas are `Look { dx, dy }` in logical px —
-  apply `sensitivity` (from `LaunchConfiguration`) and invert-look at the
-  consumer.
-* **Buttons** have 1.35× hit tolerance (thumb precision), light up when held,
-  and emit Begin/End pairs so charge-and-release mechanics (bow, shield)
-  work.
-* **Hotbar**: 9 slots along the top; tap selects; selection is echoed back by
-  `hotbar_geometry()` for drawing.
-
-### Mapping to client input
-
-| InputAction | Client binding (same layer as keyboard) |
+| Gesture | Action |
 |---|---|
-| `Move { x, y }` | analog strafe/forward (sprint = stick at rim > 0.95, or the sprint button) |
-| `Look { dx, dy }` | mouse-delta path (sensitivity applied) |
-| `Jump` / `SneakBegin/End` / `SprintBegin/End` | key states |
-| `AttackBegin/End` / `UseBegin/End` / `PickBlock` | mouse buttons |
-| `HotbarSlot(0..=8)` | hotbar keys 1-9 |
-| `Inventory` / `Chat` / `Pause` / `ZoomBegin/End` / `ToggleDebug` | keys E / T / Esc / C / F3 |
+| Touch in lower-left area, drag | Invisible joystick: 8-way WASD by angle; past 80% of its rim sprint (Left Ctrl) |
+| Touch elsewhere, drag | Camera look (the same `MouseLook::on_move` raw mouse motion takes), gain 1.35 |
+| Short still tap | Left click — attack / UI click |
+| Long still press (>=380 ms) | Right click — place / use |
+| Lift in the bottom 12% strip | Hotbar slot 1-9 by x position (the digit keys) |
+| Second finger down in the play area | Inventory toggle (E) |
+| Touch in the top-left corner (12% x 8%) | Pause menu (Escape) |
 
-### Tap-to-place trade-offs
+Thresholds (physical pixels, tuned for 1080p-class screens): dead zone 28,
+joystick rim 200, tap travel 18, tap 280 ms, long press 380 ms. All are
+constants in `touch_input`; density scaling is future work.
 
-Bedrock's "tap to place / long-press to break" is deliberately **not**
-auto-mapped. It fights with look-drag semantics and crosshair-based vanilla
-mechanics (ranged attacks, block targeting). If you want it later, add it as
-a settings toggle implemented on top of `Look` drags + a `ToggleDebug`-style
-action — the state machine's `Tracked::Look` variant is where a long-press
-timer would live.
-
-### Drawing the overlay
-
-`TouchOverlay::geometry()` returns circles (color + alpha, `a == 0` → ring);
-`hotbar_geometry()` returns the strip + selected slot. The placeholder
-renderer converts these to triangle fans — swap that for the client's UI
-renderer (same data) in Phase 3. HUD-scale note: sizes are relative to
-`min(w, h)` so nothing covers the world on tablets.
-
----
+### The old overlay (kept for the desktop demo shell)
 
 ## 9. Auth & entitlements
 
@@ -430,6 +410,29 @@ MSAL sign-in and marks this clearly in `MsalAuthManager` — implement the two
 REST calls with OkHttp/ktor when multiplayer lands, then delete the stub note.
 
 ---
+
+
+### Local accounts (shipped)
+
+A local account needs no Microsoft anything: pick a name (3-16 of
+`A-Za-z0-9_`), and the UUID is vanilla's offline scheme —
+`UUIDv3("OfflinePlayer:<name>")` (`UUID.nameUUIDFromBytes` in Kotlin) — so
+identity is stable across reinstalls. Singleplayer, LAN and offline-mode
+servers work; online-mode servers refuse it by design (ownership cannot be
+proven without Microsoft's chain).
+
+The launch hands it to the client the same way the desktop launcher hands
+over a Microsoft session: a session file, written fresh right before the
+start (the client refuses one older than 120 s, requires owner-only
+permissions, and deletes it after reading):
+
+```json
+{"name": "Steve", "uuid": "<dashed uuid>", "access_token": "offline"}
+```
+
+`access_token` must be non-empty but is only used by online-mode server
+joins, which a local account never makes. See `LocalAccountManager` (Kotlin)
+and `auth.rs` in the client (the parser).
 
 ## 10. Performance engineering
 

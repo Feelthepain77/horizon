@@ -36,6 +36,8 @@
 //! for iterating on overlay layout without a device.
 
 mod backend;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod client;
 mod demo;
 mod touch;
 
@@ -76,10 +78,23 @@ fn android_main(app: crate::AndroidApp) {
         env!("CARGO_PKG_VERSION"),
         rustc_version()
     );
-    if let Err(e) = run(Some(app)) {
-        log::error!("game shell terminated with error: {e:?}");
-        // Returning (not aborting) lets android-activity tear down cleanly;
-        // the user lands back in the launcher with a tombstone in logcat.
+    // The real client when the prepared files are there; the demo shell as
+    // the fallback (no import yet, or an incomplete one).
+    match client::launch(&launch_configuration()) {
+        Ok(true) => {
+            // The client ran and returned normally (the user quit).
+        }
+        Ok(false) => {
+            log::info!("no prepared game files — starting the demo shell");
+            if let Err(e) = run(Some(app)) {
+                log::error!("demo shell terminated with error: {e:?}");
+            }
+        }
+        Err(e) => {
+            log::error!("horizon-client terminated with error: {e}");
+            // Returning (not aborting) lets android-activity tear down
+            // cleanly; the user lands back in the launcher.
+        }
     }
 }
 
@@ -115,10 +130,26 @@ pub fn run(
 pub struct LaunchConfiguration {
     /// Absolute path to the imported game files
     /// (`versions/`, `assets/`, `libraries/`).
+    ///
+    /// Deprecated: the client never reads these at play time (they are
+    /// desktop prepare inputs); kept so older launchers still parse.
     pub game_dir: Option<String>,
-    /// Absolute path to prepared resources (the `.local/` equivalent).
+    /// Deprecated in the same way as `game_dir`.
     pub local_dir: Option<String>,
+    /// Deprecated: see `player_name`.
     pub username: Option<String>,
+    /// The prepared resources root — a directory containing
+    /// `horizon-resources.json` (see `client::is_prepared_root`).
+    pub prepared_dir: Option<String>,
+    /// The game home: cwd for the whole run and `HORIZON_HOME`. The client
+    /// writes `options.txt`, `saves/` and `logs/` there.
+    pub home_dir: Option<String>,
+    /// A session file the launcher just wrote; the client reads and deletes
+    /// it within its first 120 s. Local account or Microsoft session — same
+    /// format.
+    pub session_file: Option<String>,
+    /// The player name to join with, when there is no session file.
+    pub player_name: Option<String>,
     pub render_distance: Option<u32>,
     /// Mirrors the desktop launcher's graphics presets.
     pub graphics_preset: Option<String>,

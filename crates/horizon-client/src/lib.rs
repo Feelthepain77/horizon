@@ -1,6 +1,16 @@
 //! Horizon native client: resources, world streaming, rendering and the
 //! bindings between the validated simulation pieces and the game loop.
 #![forbid(unsafe_code)]
+
+// The game module (src/game.rs) is compiled into this library as well as into
+// the binary: the Android shell (crates/horizon-android) drives the same
+// launch from `android_main`, where there is no argv and the arguments must
+// be passed in-process (`game::run_with`). The self-alias keeps game.rs's
+// `use horizon_client::…` imports resolving when it is compiled as part of
+// this library; the binary keeps its own separate copy through main.rs.
+extern crate self as horizon_client;
+pub mod game;
+
 pub mod advancements;
 pub mod ambience;
 pub mod animate_tick;

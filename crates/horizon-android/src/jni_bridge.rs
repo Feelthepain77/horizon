@@ -159,74 +159,54 @@ pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeGpuInfo
         .resolve_with::<LogContextErrorAndDefault, _>(|| "nativeGpuInfo".into())
 }
 
-/// `HorizonNative.nativeValidateGameFiles(gameDir: String): Boolean`
+/// `HorizonNative.nativeValidateGameFiles(preparedDir: String): Boolean`
 ///
-/// Structural validation of an imported `.minecraft` tree. This deliberately
-/// does *no* file-content parsing — content verification (checksums against
-/// `research-lock.json`) belongs to the `horizon-prepare` integration
-/// (PORTING.md § "The prepare problem").
+/// Structural validation of the imported **prepared root** — the directory
+/// the client gets as `--resources`. The one thing the client hard-requires
+/// is `horizon-resources.json` (the manifest horizon-prepare writes); the
+/// raw `versions/`/`assets/` layout is a desktop prepare input and is never
+/// read at play time. Content verification (checksums) belongs to the
+/// horizon-prepare integration, not here.
 ///
-/// Emits `validate` events describing each check so the launcher can show
-/// exactly what's missing.
+/// Emits `validate` events so the launcher can show exactly what's missing.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeValidateGameFiles<
     'caller,
 >(
     mut unowned_env: jni::EnvUnowned<'caller>,
     _class: JClass<'caller>,
-    game_dir: JString<'caller>,
+    prepared_dir: JString<'caller>,
 ) -> jboolean {
     unowned_env
         .with_env(|env| -> jni::errors::Result<jboolean> {
-            let dir = game_dir.try_to_string(env)?;
+            let dir = prepared_dir.try_to_string(env)?;
             let path = Path::new(&dir);
-            log::info!("validating game files at {dir}");
+            log::info!("validating prepared resources at {dir}");
 
+            let manifest = path.join("horizon-resources.json");
             let mut ok = true;
-
-            // Required top-level dirs of a Java Edition install. `versions/26.3`
-            // is what horizon-prepare consumes; older versions are upgraded by
-            // the client like vanilla does (they still need to be imported).
-            let version_count = path
-                .join("versions")
-                .read_dir()
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok())
-                        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                        .count()
-                })
-                .unwrap_or(0);
-            if version_count == 0 {
-                emit_event("validate", "missing:versions");
+            if !manifest.is_file() {
+                emit_event("validate", "missing:horizon-resources.json");
                 ok = false;
             } else {
-                emit_event("validate", &format!("versions:{version_count}"));
-            }
-
-            for required in ["assets", "libraries"] {
-                if !path.join(required).is_dir() {
-                    emit_event("validate", &format!("missing:{required}"));
-                    ok = false;
-                } else {
-                    emit_event("validate", &format!("ok:{required}"));
+                // It must at least be the JSON the client expects to parse.
+                match std::fs::read_to_string(&manifest) {
+                    Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(_) => emit_event("validate", "ok:prepared"),
+                        Err(e) => {
+                            emit_event("validate", &format!("bad:horizon-resources.json:{e}"));
+                            ok = false;
+                        }
+                    },
+                    Err(e) => {
+                        emit_event(
+                            "validate",
+                            &format!("unreadable:horizon-resources.json:{e}"),
+                        );
+                        ok = false;
+                    }
                 }
             }
-
-            // Prepared resources (the `.local/` equivalent). Without them the
-            // client needs an on-device prepare run; the desktop "portable
-            // export" ships them pre-prepared (PORTING.md § "Portable export
-            // format").
-            let has_prepared = ["local", ".local"]
-                .iter()
-                .any(|d| path.join(d).join("prepared.json").exists());
-            emit_event(
-                "validate",
-                if has_prepared {
-                    "ok:prepared"
-                } else {
-                    "missing:prepared"
-                },
-            );
 
             emit_event(
                 "validate",
@@ -237,9 +217,9 @@ pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeValidat
                 },
             );
             if ok {
-                log::info!("game files at {dir} look usable");
+                log::info!("prepared resources at {dir} look usable");
             } else {
-                log::warn!("game files at {dir} incomplete");
+                log::warn!("prepared resources at {dir} incomplete");
             }
             Ok(ok as jboolean)
         })

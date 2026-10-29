@@ -38,6 +38,22 @@ if [[ -z "$NDK_DIR" || ! -d "$NDK_DIR" ]]; then
   exit 1
 fi
 
+# ring (via ureq/rustls in the client tree) and any other cc-based build
+# script need the NDK's clang wrappers on PATH; cargo-ndk only configures
+# the linkers. Pick the prebuilt directory matching the host.
+TOOLCHAIN_BIN=""
+for host in linux-x86_64 darwin-x86_64 windows-x86_64; do
+  if [[ -d "$NDK_DIR/toolchains/llvm/prebuilt/$host/bin" ]]; then
+    TOOLCHAIN_BIN="$NDK_DIR/toolchains/llvm/prebuilt/$host/bin"
+    break
+  fi
+done
+if [[ -n "$TOOLCHAIN_BIN" ]]; then
+  export PATH="$TOOLCHAIN_BIN:$PATH"
+else
+  echo "warning: no NDK prebuilt toolchain bin found under $NDK_DIR" >&2
+fi
+
 for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
   rustup target list --installed | grep -q "^$target$" || rustup target add "$target"
 done

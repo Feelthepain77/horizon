@@ -349,7 +349,17 @@ impl Options {
             )
         })
     }
+    /// The arguments from argv. Only the binary's copy of this module calls
+    /// this; in the library copy it is dead code (the Android shell goes
+    /// through `run_with`), hence the allow.
+    #[allow(dead_code)]
     fn read() -> Result<Option<Self>> {
+        Self::read_with(std::env::args().skip(1).collect())
+    }
+
+    /// The same, with the arguments provided by the host: Android's shell has
+    /// no argv to read (see `run_with`).
+    fn read_with(args: Vec<String>) -> Result<Option<Self>> {
         let sibling = std::env::current_exe()?
             .parent()
             .ok_or("missing executable directory")?
@@ -399,7 +409,7 @@ impl Options {
             execution_role: execution_role::ExecutionRole::Client,
         };
         let mut session_file = std::env::var("HORIZON_SESSION_FILE").ok();
-        let mut args = std::env::args().skip(1);
+        let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--help" | "-h" => {
@@ -1546,6 +1556,9 @@ struct Game<'a> {
     fullscreen: horizon_client::window::FullscreenState,
     /// MouseHandler's accumulated look and wheel state.
     mouse: MouseLook,
+    /// The touch-translation state for Android; see `translate_touch`.
+    #[cfg(target_os = "android")]
+    android_touch: touch_input::AndroidTouch,
     /// An agent moved the mouse (`mouse-move`) since the pointer was last
     /// grabbed or released: its motion turns the view like a grabbed pointer.
     agent_pointer: bool,
@@ -13010,6 +13023,341 @@ impl Game<'_> {
         }
     }
 }
+// ---------------------------------------------------------------------------
+// Android touch input (cfg-gated; desktop builds never compile it).
+//
+// Android delivers touches as `WindowEvent::Touch`; the game's input is built
+// around keyboard and mouse events. `Game::translate_touch` bridges the two
+// without making any other game logic Android-aware:
+//
+//   * on menus and overlay screens a touch becomes a cursor move plus a left
+//     click (press on start, moves in between, release on lift), so every
+//     screen's hit-testing and sliders work unmodified;
+//   * in game (Screen::Playing):
+//       - a touch starting in the lower-left area is an invisible joystick:
+//         8-way WASD from its angle, sprint (Left Ctrl) past 80% of its rim;
+//       - a touch starting in the top-left corner opens the pause menu
+//         (Escape);
+//       - any other touch drags the camera (the same `MouseLook::on_move`
+//         call raw mouse motion takes): a short still tap is a left click
+//         (attack), a long still press a right click (place/use);
+//       - a touch that lifts in the bottom strip selects a hotbar slot (the
+//         1..9 keys by position - the hotbar's row);
+//       - a second finger down in the play area toggles the inventory (E).
+//
+// Keys go through `mapped_key` - the same entry point the keyboard and
+// controllers take - because winit's `KeyEvent` cannot be constructed
+// outside winit (private platform fields). Mouse-shaped events are
+// constructed directly; winit's shapes allow that.
+//
+// The zones are invisible in this version; drawing them belongs with the HUD
+// pass (PORTING-ANDROID.md - 8). Thresholds are physical-pixel constants
+// tuned for 1080p-class screens.
+#[cfg(target_os = "android")]
+mod touch_input {
+    use winit::dpi::PhysicalPosition;
+    use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+
+    /// One finger on the glass, from press to lift.
+    #[derive(Clone, Copy)]
+    pub struct Finger {
+        pub id: u64,
+        pub origin: PhysicalPosition<f64>,
+        pub last: PhysicalPosition<f64>,
+        pub started: std::time::Instant,
+        pub travel: f64,
+    }
+
+    impl Finger {
+        pub fn new(id: u64, at: PhysicalPosition<f64>) -> Self {
+            Self {
+                id,
+                origin: at,
+                last: at,
+                started: std::time::Instant::now(),
+                travel: 0.0,
+            }
+        }
+
+        pub fn delta_from(&self, at: PhysicalPosition<f64>) -> (f64, f64) {
+            (at.x - self.last.x, at.y - self.last.y)
+        }
+
+        pub fn distance_from_origin(&self, at: PhysicalPosition<f64>) -> f64 {
+            let (dx, dy) = (at.x - self.origin.x, at.y - self.origin.y);
+            (dx * dx + dy * dy).sqrt()
+        }
+
+        pub fn moved(&mut self, at: PhysicalPosition<f64>) {
+            self.travel = self.distance_from_origin(at);
+            self.last = at;
+        }
+    }
+
+    /// The overlay's per-touch state: one joystick finger, one camera
+    /// finger, and one parked finger that already fired its action.
+    #[derive(Default)]
+    pub struct AndroidTouch {
+        pub joystick: Option<Finger>,
+        pub look: Option<Finger>,
+        pub parked: Option<Finger>,
+        /// Keys the joystick currently holds; released together on lift.
+        pub held: Vec<winit::keyboard::KeyCode>,
+    }
+
+    /// Zones, as fractions of the window.
+    pub const JOYSTICK_W: f64 = 0.40;
+    pub const JOYSTICK_H: f64 = 0.62;
+    pub const HOTBAR_H: f64 = 0.88;
+    pub const PAUSE_W: f64 = 0.12;
+    pub const PAUSE_H: f64 = 0.08;
+    /// Joystick dead zone and rim, and where sprint engages, physical pixels.
+    pub const DEAD_PX: f64 = 28.0;
+    pub const MAX_R_PX: f64 = 200.0;
+    pub const SPRINT_AT: f64 = 0.80;
+    /// A still tap: less travel than this, shorter than this many
+    /// milliseconds. A still press at least LONG_MS long is a right click.
+    pub const TAP_TRAVEL_PX: f64 = 18.0;
+    pub const TAP_MS: u128 = 280;
+    pub const LONG_MS: u128 = 380;
+    /// Touch drags read slower than a mouse at 1:1; gain them up a little.
+    pub const LOOK_GAIN: f64 = 1.35;
+
+    /// A synthetic click at the cursor's position. Keys cannot be
+    /// synthesized (winit's `KeyEvent` has private fields); they go through
+    /// the game's `mapped_key` instead.
+    pub fn click(button: MouseButton, state: ElementState) -> WindowEvent {
+        WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state,
+            button,
+        }
+    }
+
+    /// A synthetic cursor move, in physical pixels like real ones.
+    pub fn cursor(at: PhysicalPosition<f64>) -> WindowEvent {
+        WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: at,
+        }
+    }
+}
+
+/// The touch translation itself; see the `touch_input` module comment.
+#[cfg(target_os = "android")]
+impl Game<'_> {
+    /// Turn an Android touch into the desktop input it stands for, or `None`
+    /// to pass the event on untouched. Touches are always consumed (some
+    /// translate to nothing, e.g. a cancelled drag).
+    fn translate_touch(&mut self, raw: &WindowEvent) -> Option<Vec<WindowEvent>> {
+        use winit::event::TouchPhase;
+
+        // Everything that is not a touch passes through.
+        let WindowEvent::Touch(touch) = raw else {
+            return None;
+        };
+        let at = touch.location;
+        let id = touch.id;
+
+        // Menus and overlay screens: a touch is a cursor plus a left click
+        // (press on start, moves in between, release on lift). The closing
+        // save keeps its buttons but no new input while it runs.
+        if self.screen != Screen::Playing || self.pending_save.is_some() {
+            return Some(match touch.phase {
+                TouchPhase::Started => vec![
+                    touch_input::cursor(at),
+                    touch_input::click(MouseButton::Left, ElementState::Pressed),
+                ],
+                TouchPhase::Moved => vec![touch_input::cursor(at)],
+                TouchPhase::Ended | TouchPhase::Cancelled => vec![touch_input::click(
+                    MouseButton::Left,
+                    ElementState::Released,
+                )],
+            });
+        }
+
+        // In game. Zones need the window size; without a window (between
+        // suspend and resume) touches have no meaning yet.
+        let (w, h) = {
+            let size = self.window.as_ref()?.inner_size();
+            (size.width as f64, size.height as f64)
+        };
+
+        match touch.phase {
+            TouchPhase::Started => {
+                // The pause corner (top-left) opens the pause menu.
+                if at.x < w * touch_input::PAUSE_W && at.y < h * touch_input::PAUSE_H {
+                    self.android_touch.parked = Some(touch_input::Finger::new(id, at));
+                    return Some(self.tap_key(KeyCode::Escape));
+                }
+                let in_joystick_zone =
+                    at.x < w * touch_input::JOYSTICK_W && at.y < h * touch_input::JOYSTICK_H;
+                if in_joystick_zone && self.android_touch.joystick.is_none() {
+                    self.android_touch.joystick = Some(touch_input::Finger::new(id, at));
+                } else if self.android_touch.look.is_some() {
+                    // A second finger down in the play area toggles the
+                    // inventory; the finger itself is parked until it lifts.
+                    self.android_touch.parked = Some(touch_input::Finger::new(id, at));
+                    return Some(self.tap_key(KeyCode::KeyE));
+                } else {
+                    self.android_touch.look = Some(touch_input::Finger::new(id, at));
+                }
+            }
+            TouchPhase::Moved => {
+                // The joystick: 8-way WASD from its angle, sprint near the rim.
+                if self
+                    .android_touch
+                    .joystick
+                    .as_ref()
+                    .is_some_and(|f| f.id == id)
+                {
+                    let Some(f) = self.android_touch.joystick.as_mut() else {
+                        unreachable!()
+                    };
+                    let (dx, dy) = (at.x - f.origin.x, at.y - f.origin.y);
+                    let len = (dx * dx + dy * dy).sqrt();
+                    f.moved(at);
+                    let mut target: Vec<KeyCode> = Vec::new();
+                    if len >= touch_input::DEAD_PX {
+                        let (nx, ny) = (dx / len, dy / len);
+                        if ny < -0.42 {
+                            target.push(KeyCode::KeyW);
+                        }
+                        if ny > 0.42 {
+                            target.push(KeyCode::KeyS);
+                        }
+                        if nx < -0.42 {
+                            target.push(KeyCode::KeyA);
+                        }
+                        if nx > 0.42 {
+                            target.push(KeyCode::KeyD);
+                        }
+                        if len > touch_input::SPRINT_AT * touch_input::MAX_R_PX {
+                            target.push(KeyCode::ControlLeft);
+                        }
+                    }
+                    // Releases first: a direction change is W then S, never both.
+                    let held = std::mem::take(&mut self.android_touch.held);
+                    for k in &held {
+                        if !target.contains(k) {
+                            let _ = self.mapped_key(*k, false, false);
+                        }
+                    }
+                    for k in &target {
+                        if !held.contains(k) {
+                            let _ = self.mapped_key(*k, true, false);
+                        }
+                    }
+                    self.android_touch.held = target;
+                    return Some(vec![]);
+                }
+                // The camera finger: the same path raw mouse motion takes
+                // (device_event), with the grab check dropped - a touch
+                // screen has no pointer to grab, so `captured` never becomes
+                // true on Android.
+                if self.android_touch.look.as_ref().is_some_and(|f| f.id == id) {
+                    let Some(f) = self.android_touch.look.as_mut() else {
+                        unreachable!()
+                    };
+                    let (dx, dy) = f.delta_from(at);
+                    f.moved(at);
+                    if self.focused && self.pending_save.is_none() {
+                        self.mouse.on_move(
+                            0.0,
+                            0.0,
+                            dx * touch_input::LOOK_GAIN,
+                            dy * touch_input::LOOK_GAIN,
+                            true,
+                            true,
+                        );
+                        self.last_input = Instant::now();
+                    }
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                let cancelled = matches!(touch.phase, TouchPhase::Cancelled);
+                // The joystick lifts: release everything it held.
+                if self
+                    .android_touch
+                    .joystick
+                    .as_ref()
+                    .is_some_and(|f| f.id == id)
+                {
+                    self.android_touch.joystick = None;
+                    let held = std::mem::take(&mut self.android_touch.held);
+                    if !cancelled {
+                        for k in held {
+                            let _ = self.mapped_key(k, false, false);
+                        }
+                    }
+                    return Some(vec![]);
+                }
+                // The camera finger lifts: a still tap attacks, a long still
+                // press places, and a lift in the bottom strip picks a slot.
+                if self.android_touch.look.as_ref().is_some_and(|f| f.id == id) {
+                    let Some(f) = self.android_touch.look.take() else {
+                        unreachable!()
+                    };
+                    if cancelled {
+                        return Some(vec![]);
+                    }
+                    let still = f.travel < touch_input::TAP_TRAVEL_PX;
+                    let held_for = f.started.elapsed().as_millis();
+                    if still && at.y >= h * touch_input::HOTBAR_H {
+                        let slot = ((at.x / w * 9.0).floor() as i64).clamp(0, 8);
+                        let digit = [
+                            KeyCode::Digit1,
+                            KeyCode::Digit2,
+                            KeyCode::Digit3,
+                            KeyCode::Digit4,
+                            KeyCode::Digit5,
+                            KeyCode::Digit6,
+                            KeyCode::Digit7,
+                            KeyCode::Digit8,
+                            KeyCode::Digit9,
+                        ][slot as usize];
+                        return Some(self.tap_key(digit));
+                    }
+                    if still && held_for < touch_input::TAP_MS {
+                        return Some(vec![
+                            touch_input::click(MouseButton::Left, ElementState::Pressed),
+                            touch_input::click(MouseButton::Left, ElementState::Released),
+                        ]);
+                    }
+                    if still && held_for >= touch_input::LONG_MS {
+                        return Some(vec![
+                            touch_input::click(MouseButton::Right, ElementState::Pressed),
+                            touch_input::click(MouseButton::Right, ElementState::Released),
+                        ]);
+                    }
+                    return Some(vec![]);
+                }
+                if self
+                    .android_touch
+                    .parked
+                    .as_ref()
+                    .is_some_and(|f| f.id == id)
+                {
+                    self.android_touch.parked = None;
+                }
+            }
+        }
+        // Consumed without a synthetic event (a drag mid-flight, a parked or
+        // unknown finger): swallow it, so the client never sees a raw touch.
+        Some(vec![])
+    }
+
+    /// A key tapped (press and release) through the game's own mapping: the
+    /// same entry point the keyboard and controllers take. winit's
+    /// `KeyEvent` cannot be constructed outside winit, so keys have no
+    /// synthetic event form.
+    fn tap_key(&mut self, key: KeyCode) -> Vec<WindowEvent> {
+        let _ = self.mapped_key(key, true, false);
+        let _ = self.mapped_key(key, false, false);
+        Vec::new()
+    }
+}
+
 impl ApplicationHandler for Game<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -13060,6 +13408,15 @@ impl ApplicationHandler for Game<'_> {
             return;
         }
         follow_keymap(&mut event);
+        // Android: translate touch input and the Back key into the desktop
+        // events the input layer already speaks (see `touch_input`).
+        #[cfg(target_os = "android")]
+        if let Some(synthetic) = self.translate_touch(&event) {
+            for event in synthetic {
+                self.window_event(event_loop, id, event);
+            }
+            return;
+        }
         if let WindowEvent::KeyboardInput { event, .. } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {
@@ -14259,6 +14616,8 @@ impl<'a> Game<'a> {
             modifiers: winit::keyboard::ModifiersState::empty(),
             fullscreen: horizon_client::window::FullscreenState::new(false),
             mouse: MouseLook::default(),
+            #[cfg(target_os = "android")]
+            android_touch: touch_input::AndroidTouch::default(),
             agent_pointer: false,
             smooth_camera: false,
             toggles: Default::default(),
@@ -15918,7 +16277,14 @@ fn run_loading(
 }
 
 pub fn run() -> Result<()> {
-    let Some(mut options) = Options::read()? else {
+    run_with(std::env::args().skip(1).collect())
+}
+
+/// The game started with host-provided arguments. Android's NativeActivity
+/// has no argv: the shell (crates/horizon-android) builds the list from its
+/// launch configuration and calls this from `android_main`.
+pub fn run_with(args: Vec<String>) -> Result<()> {
+    let Some(mut options) = Options::read_with(args)? else {
         return Ok(());
     };
     if options.execution_role == execution_role::ExecutionRole::DedicatedServer

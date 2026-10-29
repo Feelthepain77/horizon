@@ -27,6 +27,10 @@ default = []
 desktop = []
 
 [dependencies]
+# The real client. No default features on Android's terms: no audio (no
+# ALSA; sound lands with the cpal/Oboe workstream) and no controllers
+# (gilrs has no Android backend; the touch overlay replaces them).
+horizon-client = { path = "../horizon-client", default-features = false }
 # NOTE (workspace integration): when this crate is merged into the Horizon
 # workspace, switch these to `workspace = true` entries wherever the parent
 # workspace already manages the version (wgpu/winit in particular), and delete

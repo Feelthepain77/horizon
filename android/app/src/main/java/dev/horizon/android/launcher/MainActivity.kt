@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,17 +25,21 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -89,13 +94,18 @@ private fun LauncherScreen() {
 
         when (val a = authState) {
             is AuthState.SignedOut -> SignInSection(state)
-            is AuthState.SignedIn -> {
-                if (state.imported) ReadySection(state, a) else ImportSection(state)
-                SettingsSection(state)
-                DeviceSection(state)
-                Footer(state, a)
-            }
+            is AuthState.SignedIn -> Unit // the account card below shows it
         }
+
+        LocalAccountsSection(state)
+        if (state.hasPrepared) {
+            ReadySection(state)
+        } else {
+            ImportSection(state)
+        }
+        SettingsSection(state)
+        DeviceSection(state)
+        Footer(state)
     }
 }
 
@@ -133,6 +143,11 @@ private fun SignInSection(state: LauncherState) {
             Button(onClick = { state.signIn(activity) }, modifier = Modifier.fillMaxWidth()) {
                 Text(stringResourceCompat(R.string.sign_in_with_microsoft))
             }
+            Text(
+                "No Microsoft account? Create a local account below and play.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -150,7 +165,8 @@ private fun ImportSection(state: LauncherState) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Game files", style = MaterialTheme.typography.titleLarge)
             Text(
-                "Transfer files from your own Minecraft: Java Edition install, then import. Horizon never downloads game files.",
+                "Import the portable export from the desktop launcher (it runs horizon-prepare on the PC " +
+                    "and packs the result). Horizon never downloads game files.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -160,9 +176,95 @@ private fun ImportSection(state: LauncherState) {
                 Text("Import portable export (.zip)")
             }
             OutlinedButton(onClick = { treePicker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
-                Text("Import .minecraft folder")
+                Text("Import export folder")
             }
             ImportProgress(state)
+        }
+    }
+}
+
+@Composable
+private fun LocalAccountsSection(state: LauncherState) {
+    var name by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    val active = state.activeProfile()
+
+    Card {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Local accounts", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Play without any Microsoft account. The UUID is vanilla's offline scheme " +
+                    "(UUIDv3 of \"OfflinePlayer:<name>\"), so your identity is stable across reinstalls. " +
+                    "Singleplayer, LAN and offline-mode servers work; online-mode servers will refuse it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            state.localAccounts.forEach { account ->
+                val selected = state.activeLocalUuid == account.uuid
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { state.selectLocalAccount(if (selected) null else account.uuid) },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            account.name + if (selected) "  ✓" else "",
+                            color = if (selected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            account.uuid,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = { state.deleteLocalAccount(account.uuid) }) { Text("Remove") }
+                }
+            }
+
+            if (state.localAccounts.isEmpty()) {
+                Text(
+                    "None yet — create one to play without signing in.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+            }
+
+            OutlinedTextField(
+                value = name,
+                onValueChange = {
+                    name = it
+                    error = null
+                },
+                singleLine = true,
+                label = { Text("Player name (3–16 letters, digits or _)") },
+                isError = error != null,
+                supportingText = { error?.let { Text(it, color = MaterialTheme.colorScheme.error) } },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = {
+                    if (state.createLocalAccount(name)) {
+                        name = ""
+                    } else {
+                        error = "Not a valid player name (3–16 of A-Z a-z 0-9 _)."
+                    }
+                },
+                enabled = name.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Create local account") }
+
+            if (active != null && active.msUserId == null) {
+                Text(
+                    "Next game runs as ${active.username} (local account).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
     }
 }
@@ -188,24 +290,22 @@ private fun ImportProgress(state: LauncherState) {
 }
 
 @Composable
-private fun ReadySection(state: LauncherState, auth: AuthState.SignedIn) {
+private fun ReadySection(state: LauncherState) {
+    val profile = state.activeProfile()
     Card {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(
-                "Ready${auth.profile.uuid?.let { "" } ?: " (local profile)"}",
-                style = MaterialTheme.typography.titleLarge,
-            )
-            if (!state.hasPrepared) {
+            Text("Ready", style = MaterialTheme.typography.titleLarge)
+            if (profile == null) {
                 Text(
-                    "No prepared resources (local/) — the on-device prepare step is not integrated yet; " +
-                        "import a portable export from the desktop launcher for the full experience " +
-                        "(PORTING.md § \"The prepare problem\").",
+                    "Pick a Microsoft account or a local account to play.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.secondary,
                 )
             }
             Text(
-                "Touch controls: left stick moves, right side looks, thumb cluster acts, top strip is the hotbar.",
+                "Touch controls: lower-left = move (invisible stick), drag elsewhere = look, " +
+                    "tap = attack, long-press = place, bottom strip = hotbar, " +
+                    "second finger = inventory, top-left corner = pause.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -213,9 +313,14 @@ private fun ReadySection(state: LauncherState, auth: AuthState.SignedIn) {
                 onClick = { state.play() },
                 modifier = Modifier.fillMaxWidth().height(56.dp),
                 colors = ButtonDefaults.buttonColors(),
-                enabled = dev.horizon.android.game.HorizonNative.available,
+                enabled = dev.horizon.android.game.HorizonNative.available && profile != null,
             ) {
-                Text(if (dev.horizon.android.game.HorizonNative.available) "PLAY" else "PLAY — native library missing", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    if (dev.horizon.android.game.HorizonNative.available) "PLAY"
+                    else "PLAY - native library missing",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { state.validate() }) { Text("Validate") }
@@ -300,10 +405,13 @@ private fun DeviceSection(state: LauncherState) {
 }
 
 @Composable
-private fun Footer(state: LauncherState, auth: AuthState.SignedIn) {
+private fun Footer(state: LauncherState) {
+    val profile = state.activeProfile()
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
         Text(
-            "Signed in as ${auth.profile.username}",
+            profile?.let { p ->
+                "Next game: ${p.username}" + (p.uuid?.let { "  (${it.take(8)}...)" } ?: "")
+            } ?: "No account selected",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -312,7 +420,9 @@ private fun Footer(state: LauncherState, auth: AuthState.SignedIn) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        OutlinedButton(onClick = { state.signOut() }) { Text("Sign out") }
+        if (state.auth.state.value is AuthState.SignedIn) {
+            OutlinedButton(onClick = { state.signOut() }) { Text("Sign out of Microsoft") }
+        }
     }
 }
 

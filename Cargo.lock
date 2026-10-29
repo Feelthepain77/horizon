@@ -1377,6 +1377,7 @@ version = "0.1.0"
 dependencies = [
  "android_logger",
  "bytemuck",
+ "horizon-client",
  "jni 0.22.4",
  "log",
  "pollster",
