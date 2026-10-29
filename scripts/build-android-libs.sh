@@ -54,6 +54,22 @@ else
   echo "warning: no NDK prebuilt toolchain bin found under $NDK_DIR" >&2
 fi
 
+# cc-rs (ring and friends, via ureq/rustls in the client tree) checks these
+# before probing PATH. NDK r30 ships only API-suffixed wrappers (no bare
+# <triple>-clang); armv7a keeps its v7a in the NDK's naming. minSdk is 35.
+export CC_aarch64_linux_android="$TOOLCHAIN_BIN/aarch64-linux-android35-clang"
+export AR_aarch64_linux_android="$TOOLCHAIN_BIN/llvm-ar"
+export RANLIB_aarch64_linux_android="$TOOLCHAIN_BIN/llvm-ranlib"
+export CC_armv7_linux_androideabi="$TOOLCHAIN_BIN/armv7a-linux-androideabi35-clang"
+export AR_armv7_linux_androideabi="$TOOLCHAIN_BIN/llvm-ar"
+export RANLIB_armv7_linux_androideabi="$TOOLCHAIN_BIN/llvm-ranlib"
+export CC_x86_64_linux_android="$TOOLCHAIN_BIN/x86_64-linux-android35-clang"
+export AR_x86_64_linux_android="$TOOLCHAIN_BIN/llvm-ar"
+export RANLIB_x86_64_linux_android="$TOOLCHAIN_BIN/llvm-ranlib"
+export CC_i686_linux_android="$TOOLCHAIN_BIN/i686-linux-android35-clang"
+export AR_i686_linux_android="$TOOLCHAIN_BIN/llvm-ar"
+export RANLIB_i686_linux_android="$TOOLCHAIN_BIN/llvm-ranlib"
+
 for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
   rustup target list --installed | grep -q "^$target$" || rustup target add "$target"
 done

@@ -57,21 +57,22 @@ jobs:
           echo "NDK toolchain bin: $BIN"
           ls "$BIN" | grep -E '(clang|ar)$' | head -20 || true
           echo "$BIN" >> "$GITHUB_PATH"
-          # cc-rs (ring and friends) checks these before probing PATH. The
-          # env names must match cargo's triples; the NDK drops the v7a for
-          # armeabi-v7a, so the two lists differ there.
-          echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android-clang"     >> "$GITHUB_ENV"
-          echo "AR_aarch64_linux_android=$BIN/llvm-ar"                          >> "$GITHUB_ENV"
-          echo "RANLIB_aarch64_linux_android=$BIN/llvm-ranlib"                  >> "$GITHUB_ENV"
-          echo "CC_armv7_linux_androideabi=$BIN/arm-linux-androideabi-clang"    >> "$GITHUB_ENV"
-          echo "AR_armv7_linux_androideabi=$BIN/llvm-ar"                        >> "$GITHUB_ENV"
-          echo "RANLIB_armv7_linux_androideabi=$BIN/llvm-ranlib"                >> "$GITHUB_ENV"
-          echo "CC_x86_64_linux_android=$BIN/x86_64-linux-android-clang"        >> "$GITHUB_ENV"
-          echo "AR_x86_64_linux_android=$BIN/llvm-ar"                           >> "$GITHUB_ENV"
-          echo "RANLIB_x86_64_linux_android=$BIN/llvm-ranlib"                   >> "$GITHUB_ENV"
-          echo "CC_i686_linux_android=$BIN/i686-linux-android-clang"            >> "$GITHUB_ENV"
-          echo "AR_i686_linux_android=$BIN/llvm-ar"                             >> "$GITHUB_ENV"
-          echo "RANLIB_i686_linux_android=$BIN/llvm-ranlib"                     >> "$GITHUB_ENV"
+          # cc-rs (ring and friends) checks these before probing PATH. NDK r30
+          # ships only API-suffixed wrappers (the bare <triple>-clang does not
+          # exist), so point at the minSdk-35 ones; the armv7a triple keeps its
+          # v7a in the NDK's naming.
+          echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android35-clang"   >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$BIN/llvm-ar"                         >> "$GITHUB_ENV"
+          echo "RANLIB_aarch64_linux_android=$BIN/llvm-ranlib"                 >> "$GITHUB_ENV"
+          echo "CC_armv7_linux_androideabi=$BIN/armv7a-linux-androideabi35-clang" >> "$GITHUB_ENV"
+          echo "AR_armv7_linux_androideabi=$BIN/llvm-ar"                       >> "$GITHUB_ENV"
+          echo "RANLIB_armv7_linux_androideabi=$BIN/llvm-ranlib"               >> "$GITHUB_ENV"
+          echo "CC_x86_64_linux_android=$BIN/x86_64-linux-android35-clang"     >> "$GITHUB_ENV"
+          echo "AR_x86_64_linux_android=$BIN/llvm-ar"                          >> "$GITHUB_ENV"
+          echo "RANLIB_x86_64_linux_android=$BIN/llvm-ranlib"                  >> "$GITHUB_ENV"
+          echo "CC_i686_linux_android=$BIN/i686-linux-android35-clang"         >> "$GITHUB_ENV"
+          echo "AR_i686_linux_android=$BIN/llvm-ar"                            >> "$GITHUB_ENV"
+          echo "RANLIB_i686_linux_android=$BIN/llvm-ranlib"                    >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
