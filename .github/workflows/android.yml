@@ -67,7 +67,11 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # The legacy 'tools' package no longer exists in the SDK repository and
+      # setup-android installs it when given no inputs, so name a real one.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install NDK + platform
         run: |
@@ -118,7 +122,11 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # The legacy 'tools' package no longer exists in the SDK repository and
+      # setup-android installs it when given no inputs, so name a real one.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install NDK + platform
         run: |
