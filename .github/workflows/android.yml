@@ -12,6 +12,10 @@ on:
       - ".github/workflows/android.yml"
       - "Cargo.toml"
       - "Cargo.lock"
+      # The portable export is built from these too: a new pin or a changed
+      # exporter source changes its tables.
+      - "research-lock.json"
+      - "mods/horizon/src/test/java/dev/horizonlab/parity/**"
   pull_request:
     paths:
       - "crates/**"
@@ -20,6 +24,8 @@ on:
       - ".github/workflows/android.yml"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "research-lock.json"
+      - "mods/horizon/src/test/java/dev/horizonlab/parity/**"
   workflow_dispatch:
 
 env:
@@ -78,6 +84,81 @@ jobs:
       - name: unit tests (host)
         if: matrix.target == 'aarch64-linux-android'
         run: cargo test -p horizon-android
+
+  portable-export:
+    # The one-time portable export: the Java-25 exporter tables Android
+    # cannot run (ART will not load Java-25 classes; targetSdk 29+ forbids a
+    # JVM). The player imports the zip once next to the .minecraft they
+    # already gave the app, and PLAY unlocks (the two paths compose into the
+    # same prepared root; see crates/horizon-android/src/prepare.rs).
+    #
+    # The runner owns no .minecraft, so scripts/fetch-pinned-game-files.py
+    # makes the minimal one from Mojang's public piston-meta/piston-data
+    # endpoints, every file checked against research-lock.json — the same
+    # checks the preparer re-applies on import. Nothing game-derived is ever
+    # committed (.gitignore keeps .local/ and *.jar out; the pre-push hook
+    # scans history), and the artifact is transient.
+    name: Portable export
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # What research-lock.json pins (java_major); the exporters compile
+          # and run with it.
+          java-version: "25"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: portable-export
+
+      - name: Fetch the pinned game files from Mojang's public endpoints
+        run: |
+          version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' research-lock.json | head -1)
+          echo "version=$version" >> "$GITHUB_ENV"
+          python3 scripts/fetch-pinned-game-files.py --out "$RUNNER_TEMP/minecraft"
+
+      - name: Build horizon-prepare
+        run: cargo build --release --locked -p horizon-prepare
+
+      - name: Prepare the resources (the exporters run here)
+        run: |
+          target/release/horizon-prepare --prepare --root "$PWD" \
+            --minecraft-dir "$RUNNER_TEMP/minecraft" \
+            --server-jar "$RUNNER_TEMP/minecraft/server-$version.jar"
+
+      - name: Pack the export (only what the phone cannot make)
+        run: |
+          set -euo pipefail
+          # The phone's own prepare already extracted the client JAR's
+          # assets/ and data/ and copied the real sounds, panorama, Unifont,
+          # packs and languages from the player's asset store; the JAR's
+          # placeholders in those paths must not overwrite them. Logs and the
+          # compiled exporters' classes are build noise. Everything else —
+          # the exporter tables, the datagen reports, the worldgen bundle —
+          # is what the import brings.
+          cd ".local/horizon-client/$version"
+          zip -qr9 "$RUNNER_TEMP/portable-export-$version.zip" "$version" \
+            -x "$version/assets/*" "$version/data/*" \
+            -x "$version/classes/*" "$version/client-classes/*" \
+            -x "$version/*.log" "*.log"
+          du -h "$RUNNER_TEMP/portable-export-$version.zip"
+
+      - name: Verify the export against the Android client's requirements
+        run: python3 scripts/verify-portable-export.py "$RUNNER_TEMP/portable-export-$version.zip"
+
+      - name: Upload the portable export
+        uses: actions/upload-artifact@v4
+        with:
+          name: horizon-portable-export-${{ env.version }}
+          path: ${{ runner.temp }}/portable-export-${{ env.version }}.zip
+          retention-days: 14
+          if-no-files-found: error
 
   apk:
     name: APK (arm64-v8a)
