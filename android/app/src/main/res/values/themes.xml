@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose draws everything; these only need to be fullscreen and dark. -->
+    <style name="Theme.Horizon.Launcher" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/launcher_background</item>
+        <item name="android:statusBarColor">@color/launcher_background</item>
+        <item name="android:navigationBarColor">@color/launcher_background</item>
+    </style>
+
+    <!-- The game activity renders with Vulkan; no content view is set. -->
+    <style name="Theme.Horizon.Game" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
+
+    <!-- MSAL's BrowserTabActivity extends AppCompatActivity. -->
+    <style name="Theme.Horizon.Msal" parent="Theme.AppCompat.NoActionBar" />
+</resources>

@@ -34,3 +34,13 @@
 
 # Release-only compiled original exporter bundle.
 /exporters/
+
+# --- Android port ---
+android/.gradle/
+android/build/
+android/app/build/
+android/.kotlin/
+android/local.properties
+android/app/src/main/jniLibs/
+*.keystore
+*.jks

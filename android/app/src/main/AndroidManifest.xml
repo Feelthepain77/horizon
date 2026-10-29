@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Microsoft sign-in + Xbox Live / Minecraft services calls. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Vulkan 1.1 is the floor: wgpu's Vulkan backend requires it, and every
+         Android 15 device class ships conformant drivers. This also keeps the
+         app off Vulkan-less devices in store listings. -->
+    <uses-feature
+        android:name="android.hardware.vulkan.version"
+        android:version="0x401000"
+        android:required="true" />
+    <!-- Basic compute support (shader storage buffers) — also a wgpu
+         requirement; level 0 == Vulkan 1.0-level compute. -->
+    <uses-feature
+        android:name="android.hardware.vulkan.compute"
+        android:version="0"
+        android:required="true" />
+
+    <application
+        android:name=".HorizonApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Horizon.Launcher">
+
+        <!-- Launcher UI (Compose). -->
+        <activity
+            android:name=".launcher.MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Horizon.Launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The game itself. android.app.NativeActivity hands the window to
+             libhorizon_android.so (android-activity native-activity backend
+             via winit); the Kotlin subclass only pins immersive mode. -->
+        <activity
+            android:name=".game.HorizonGameActivity"
+            android:exported="false"
+            android:screenOrientation="userLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.Horizon.Game">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="horizon_android" />
+        </activity>
+
+        <!-- MSAL redirect target. The host MUST equal the applicationId and
+             the path MUST equal the base64url SHA-1 of your signing key —
+             see android/app/src/main/res/raw/auth_config.json and
+             PORTING.md § "Auth & entitlements". -->
+        <activity
+            android:name="com.microsoft.identity.client.BrowserTabActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Horizon.Msal">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:scheme="msauth"
+                    android:host="dev.horizon.android"
+                    android:path="/REPLACE_WITH_BASE64URL_SHA1_OF_SIGNING_KEY" />
+            </intent-filter>
+        </activity>
+
+        <!-- Browser visibility for MSAL (Android 11+ package visibility).
+             NOTE: <queries> is a sibling of <application>, see below. -->
+    </application>
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+</manifest>

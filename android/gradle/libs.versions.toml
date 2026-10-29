@@ -1,0 +1,32 @@
+# Version catalog for the Horizon Android launcher.
+# Versions verified against Google Maven / Maven Central on 2026-10-30.
+
+[versions]
+agp = "9.5.0"
+kotlin = "2.4.21"
+activityCompose = "1.13.0"
+composeBom = "2026.09.00"
+coroutines = "1.11.0"
+appcompat = "1.8.0"
+msal = "8.6.0"
+
+[libraries]
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+msal = { group = "com.microsoft.identity.client", name = "msal", version.ref = "msal" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+# AGP 9.x compiles Kotlin sources with its built-in Kotlin support, so
+# org.jetbrains.kotlin.android is NOT applied. If you downgrade to AGP 8.x,
+# apply kotlin-android as well (see app/build.gradle.kts).
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

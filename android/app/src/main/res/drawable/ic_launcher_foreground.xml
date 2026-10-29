@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Horizon glyph: sky arc over a rising sun, on transparent background. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- sky arc -->
+    <path
+        android:fillColor="#7FB2E5"
+        android:pathData="M24,58 A30,30 0 0 1 84,58 Z" />
+    <!-- sun -->
+    <path
+        android:fillColor="#FFD54F"
+        android:pathData="M40,58 A14,14 0 0 1 68,58 Z" />
+    <!-- ground -->
+    <path
+        android:fillColor="#4CAF50"
+        android:pathData="M18,62 L90,62 A4,4 0 0 1 94,66 L94,70 A4,4 0 0 1 90,74 L18,74 A4,4 0 0 1 14,70 L14,66 A4,4 0 0 1 18,62 Z" />
+</vector>

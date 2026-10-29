@@ -1,0 +1,59 @@
+[package]
+name = "horizon-android"
+version = "0.1.0"
+edition = "2024"
+description = "Android runtime for the Horizon client: android-activity/winit shell, Vulkan-only wgpu bootstrap, touch overlay, and the Kotlin<->Rust JNI bridge."
+license = "MIT"
+rust-version = "1.85"
+publish = false
+
+[lib]
+# cdylib -> libhorizon_android.so, loaded by android.app.NativeActivity
+# (see android/app/src/main/AndroidManifest.xml, meta-data android.app.lib_name).
+# lib    -> keeps the crate unit-testable and reusable by the workspace.
+name = "horizon_android"
+crate-type = ["cdylib", "lib"]
+
+# Desktop debug runner for the renderer + touch overlay:
+#   cargo run -p horizon-android --features desktop
+# The `required-features` gate keeps this target out of Android builds.
+[[bin]]
+name = "horizon-android-desktop"
+path = "src/desktop.rs"
+required-features = ["desktop"]
+
+[features]
+default = []
+desktop = []
+
+[dependencies]
+# NOTE (workspace integration): when this crate is merged into the Horizon
+# workspace, switch these to `workspace = true` entries wherever the parent
+# workspace already manages the version (wgpu/winit in particular), and delete
+# the duplicated version pins. Until then this crate is intentionally
+# self-contained so it can be built and validated standalone.
+#
+# Keep wgpu's default feature set identical to horizon-client so the same
+# shader/feature code paths compile on Android.
+wgpu = "30"
+winit = { version = "0.30", features = ["android-native-activity"] }
+# request_adapter/request_device are async in wgpu 30; pollster is the
+# zero-dep way to block on them from the android_main thread.
+pollster = "0.4"
+log = { version = "0.4", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytemuck = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Must match the jni version used by android-activity 0.6 (via winit) so
+# Env/JavaVM types interoperate.
+jni = "0.22"
+android_logger = "0.15"
+
+[profile.release]
+# The Horizon workspace sets lto = "thin", codegen-units = 1 for release;
+# for local experimentation on device the `fast`-style profile below is
+# much quicker to iterate with. The workspace profile wins once merged.
+lto = "thin"
+codegen-units = 1
