@@ -53,7 +53,25 @@ jobs:
           NDK=$(sdkmanager --list | grep -oE 'ndk;[0-9.]+' | sort -V | tail -1)
           echo "Installing $NDK"
           yes | sdkmanager "$NDK" > /dev/null
-          echo "$ANDROID_HOME/ndk/${NDK#ndk;}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          BIN="$ANDROID_HOME/ndk/${NDK#ndk;}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "NDK toolchain bin: $BIN"
+          ls "$BIN" | grep -E '(clang|ar)$' | head -20 || true
+          echo "$BIN" >> "$GITHUB_PATH"
+          # cc-rs (ring and friends) checks these before probing PATH. The
+          # env names must match cargo's triples; the NDK drops the v7a for
+          # armeabi-v7a, so the two lists differ there.
+          echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android-clang"     >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$BIN/llvm-ar"                          >> "$GITHUB_ENV"
+          echo "RANLIB_aarch64_linux_android=$BIN/llvm-ranlib"                  >> "$GITHUB_ENV"
+          echo "CC_armv7_linux_androideabi=$BIN/arm-linux-androideabi-clang"    >> "$GITHUB_ENV"
+          echo "AR_armv7_linux_androideabi=$BIN/llvm-ar"                        >> "$GITHUB_ENV"
+          echo "RANLIB_armv7_linux_androideabi=$BIN/llvm-ranlib"                >> "$GITHUB_ENV"
+          echo "CC_x86_64_linux_android=$BIN/x86_64-linux-android-clang"        >> "$GITHUB_ENV"
+          echo "AR_x86_64_linux_android=$BIN/llvm-ar"                           >> "$GITHUB_ENV"
+          echo "RANLIB_x86_64_linux_android=$BIN/llvm-ranlib"                   >> "$GITHUB_ENV"
+          echo "CC_i686_linux_android=$BIN/i686-linux-android-clang"            >> "$GITHUB_ENV"
+          echo "AR_i686_linux_android=$BIN/llvm-ar"                             >> "$GITHUB_ENV"
+          echo "RANLIB_i686_linux_android=$BIN/llvm-ranlib"                     >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
