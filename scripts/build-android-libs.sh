@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Build the Rust game library (libhorizon_android.so) for all Android ABIs
-# into android/app/src/main/jniLibs/ using cargo-ndk.
+# Build the Rust game library (libhorizon_android.so) for Android into
+# android/app/src/main/jniLibs/ using cargo-ndk. arm64-v8a only: the other
+# ABIs were bloat (no supported phone isn't aarch64).
 #
 # Usage:
 #   ./scripts/build-android-libs.sh [--profile dev|release|fast] [--abis a,b,..]
 #
-# Requirements: rustup + the four Android targets, Android NDK (ANDROID_HOME
+# Requirements: rustup + the aarch64 Android target, Android NDK (ANDROID_HOME
 # or ANDROID_NDK_HOME), cargo-ndk (`cargo install cargo-ndk`).
 set -euo pipefail
 
@@ -14,7 +15,7 @@ CRATE_DIR="$SCAFFOLD_ROOT/crates/horizon-android"
 JNILIBS_DIR="$SCAFFOLD_ROOT/android/app/src/main/jniLibs"
 
 PROFILE="dev"
-ABIS="arm64-v8a,armeabi-v7a,x86,x86_64"
+ABIS="arm64-v8a"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,23 +57,12 @@ fi
 
 # cc-rs (ring and friends, via ureq/rustls in the client tree) checks these
 # before probing PATH. NDK r30 ships only API-suffixed wrappers (no bare
-# <triple>-clang); armv7a keeps its v7a in the NDK's naming. minSdk is 35.
+# <triple>-clang), so point at the minSdk-35 one.
 export CC_aarch64_linux_android="$TOOLCHAIN_BIN/aarch64-linux-android35-clang"
 export AR_aarch64_linux_android="$TOOLCHAIN_BIN/llvm-ar"
 export RANLIB_aarch64_linux_android="$TOOLCHAIN_BIN/llvm-ranlib"
-export CC_armv7_linux_androideabi="$TOOLCHAIN_BIN/armv7a-linux-androideabi35-clang"
-export AR_armv7_linux_androideabi="$TOOLCHAIN_BIN/llvm-ar"
-export RANLIB_armv7_linux_androideabi="$TOOLCHAIN_BIN/llvm-ranlib"
-export CC_x86_64_linux_android="$TOOLCHAIN_BIN/x86_64-linux-android35-clang"
-export AR_x86_64_linux_android="$TOOLCHAIN_BIN/llvm-ar"
-export RANLIB_x86_64_linux_android="$TOOLCHAIN_BIN/llvm-ranlib"
-export CC_i686_linux_android="$TOOLCHAIN_BIN/i686-linux-android35-clang"
-export AR_i686_linux_android="$TOOLCHAIN_BIN/llvm-ar"
-export RANLIB_i686_linux_android="$TOOLCHAIN_BIN/llvm-ranlib"
 
-for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
-  rustup target list --installed | grep -q "^$target$" || rustup target add "$target"
-done
+rustup target list --installed | grep -q "^aarch64-linux-android$" || rustup target add aarch64-linux-android
 
 # Map cargo profile to cargo-ndk profile flag.
 case "$PROFILE" in
@@ -84,6 +74,12 @@ esac
 
 echo ">> Building horizon-android for: $ABIS (profile: $PROFILE)"
 echo ">> NDK: $NDK_DIR"
+
+# Drop .so trees from ABIs we no longer build: a stale armeabi-v7a/x86/x86_64
+# dir under jniLibs would sneak dead libraries into the APK.
+for abi in armeabi-v7a x86 x86_64; do
+  rm -rf "$JNILIBS_DIR/$abi"
+done
 
 # cargo-ndk selects the right linker per target and copies libc++_shared if
 # needed (we link none — pure Rust + wgpu, so the .so is self-contained).

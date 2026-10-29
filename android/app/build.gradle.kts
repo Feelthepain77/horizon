@@ -17,10 +17,11 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
-        // All four ABIs (phones + emulator). Drop armeabi-v7a for faster
-        // local builds: ./scripts/build-android-libs.sh --abis arm64-v8a
+        // arm64-v8a only: every supported phone is aarch64 and the other
+        // three ABIs (armeabi-v7a/x86/x86_64) were pure bloat. The build
+        // script still accepts --abis for local overrides.
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            abiFilters += listOf("arm64-v8a")
         }
     }
 

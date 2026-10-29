@@ -9,8 +9,9 @@ debugging/troubleshooting playbook.
 
 Everything marked **verified** below was actually executed while building this
 scaffold (2026-10-30): the Rust crate type-checks against the real dependency
-tree on all four Android targets, and the Gradle project produced real debug
-and release APKs with AGP 9.5.
+tree on `aarch64-linux-android` (arm64-v8a — the only ABI the port builds; the
+scaffold era verified all four, and 2026-10 cut the other three as bloat), and
+the Gradle project produced real debug and release APKs with AGP 9.5.
 
 ---
 
@@ -18,7 +19,7 @@ and release APKs with AGP 9.5.
 
 | Piece | State |
 |---|---|
-| `crates/horizon-android` — android-activity/winit shell, Vulkan-only wgpu bootstrap, touch overlay, JNI bridge, placeholder renderer | **Code complete.** `cargo check` passes on `aarch64/armv7/x86_64/i686`-linux-android; unit tests pass; clippy clean |
+| `crates/horizon-android` — android-activity/winit shell, Vulkan-only wgpu bootstrap, touch overlay, JNI bridge, placeholder renderer | **Code complete.** `cargo check` passes on `aarch64-linux-android`; unit tests pass; clippy clean |
 | `android/` — Kotlin Compose launcher (MSAL sign-in, game-file import via SAF, settings, device info) + NativeActivity host | **Builds.** `assembleDebug` + `assembleRelease` verified with AGP 9.5.0 / Gradle 9.8.2 / Kotlin 2.4.21 |
 | Native `.so` link step (cargo-ndk) | Scripted, exercised in CI; not linked in this sandbox (no NDK) |
 | `horizon-client` actually rendering on device | **Not started** — that's the porting work this handbook walks you through |
@@ -134,13 +135,13 @@ Edition 2024 / rustc 1.85 minimum matches the workspace. The crate uses
 
 ```sh
 # One-time
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+rustup target add aarch64-linux-android
 cargo install cargo-ndk
 export ANDROID_HOME=...   # with an NDK under $ANDROID_HOME/ndk/
 
 # Native libs → android/app/src/main/jniLibs/
-./scripts/build-android-libs.sh --profile dev      # or release | fast
-./scripts/build-android-libs.sh --abis arm64-v8a   # fast local iteration
+./scripts/build-android-libs.sh --profile dev      # or release | fast (arm64-v8a only)
+./scripts/build-android-libs.sh --abis x86_64      # escape hatch for local emulator work
 
 # APK
 ./scripts/build-apk.sh --variant debug             # rust libs + gradle
@@ -154,8 +155,8 @@ Gradle can also chain the Rust build: `./gradlew assembleDebug -PrustBuild`.
 
 ### CI
 
-`.github/workflows/android.yml` runs three jobs: per-target `cargo check` +
-unit tests, a debug APK (all four ABIs), and an unsigned release AAB on
+`.github/workflows/android.yml` runs three jobs: `cargo check` (arm64-v8a) +
+unit tests, a debug APK (arm64-v8a), and an unsigned release AAB on
 `main`. NDK version is auto-selected (`sdkmanager --list | sort -V | tail`),
 so CI doesn't rot when a new NDK ships.
 
@@ -517,7 +518,6 @@ Every entry below was hit and fixed while building this scaffold.
 | MSAL `onAccountLoaded` override mismatch | 8.x takes nullable params | Match `MsalAuthManager.kt` exactly. |
 | Maven Central bursts of HTTP 429 in CI | rate limiting | Gradle caches make this rare; if it recurs, add a repo mirror in `settings.gradle.kts`. |
 | `no Vulkan adapter found` on emulator | emulator without Vulkan | Use `-gpu swiftshader_indirect` (software Vulkan) or a physical device. |
-| `armv7` link failures on some NDK versions | 16 KB page sizes (newer NDKs default `-Wl,-z,max-page-size=16384`) | Fine for minSdk 35 devices; if you see alignment crashes on old images, pin the NDK's page-size flag. |
 
 ---
 

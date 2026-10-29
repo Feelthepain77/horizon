@@ -9,7 +9,7 @@ info() { echo "  [--]   $1"; }
 echo "== Rust =="
 if command -v cargo >/dev/null; then
   pass "cargo $(cargo --version | cut -d' ' -f2)"
-  for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
+  for target in aarch64-linux-android; do
     if rustup target list --installed 2>/dev/null | grep -q "^$target$"; then
       pass "target $target"
     else
