@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "MSAL configuration for the Horizon Android launcher.",
+    "Replace client_id with your Azure app registration's ID (the same one",
+    "the desktop Horizon launcher uses, or a new registration with",
+    "'Mobile and desktop application' platform + the msauth:// redirect URI",
+    "below). Replace the signature hash in the redirect URI with the base64url",
+    "SHA-1 of your signing key:",
+    "  keytool -exportcert -alias androiddebugkey -keystore ~/.android/debug.keystore -storepass android | openssl sha1 -binary | base64 | tr '+/' '-_' | tr -d '='",
+    "See PORTING.md section 'Auth & entitlements' for the full flow."
+  ],
+  "client_id": "YOUR_AZURE_APP_CLIENT_ID",
+  "authorization_user_agent": "DEFAULT",
+  "redirect_uri": "msauth://dev.horizon.android/REPLACE_WITH_BASE64URL_SHA1_OF_SIGNING_KEY",
+  "broker_redirect_uri_registered": false,
+  "account_mode": "SINGLE",
+  "authorities": [
+    {
+      "type": "AAD",
+      "authority_url": "https://login.microsoftonline.com/common",
+      "default": true
+    }
+  ]
+}

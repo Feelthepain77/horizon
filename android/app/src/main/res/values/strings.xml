@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Horizon</string>
+
+    <!-- Launcher -->
+    <string name="sign_in_with_microsoft">Sign in with Microsoft</string>
+    <string name="sign_out">Sign out</string>
+    <string name="auth_stub_banner">Running with a local profile — MSAL is not configured. See PORTING.md § Auth.</string>
+    <string name="import_zip">Import portable export (.zip)</string>
+    <string name="import_folder">Import .minecraft folder</string>
+    <string name="validate_files">Validate game files</string>
+    <string name="delete_files">Delete imported files</string>
+    <string name="play">Play</string>
+    <string name="settings">Settings</string>
+    <string name="render_distance">Render distance</string>
+    <string name="sensitivity">Look sensitivity</string>
+    <string name="invert_look">Invert look</string>
+    <string name="graphics_preset">Graphics preset</string>
+    <string name="device_info">Device</string>
+    <string name="import_hint">Transfer your .minecraft files or a portable export from the desktop launcher, then import them here. Horizon never downloads Minecraft files.</string>
+    <string name="vulkan_unavailable">Vulkan 1.1+ required — this device reports: %1$s</string>
+    <string name="ready_hint">Everything checks out. Touch controls: left stick moves, right side looks, buttons map like Bedrock.</string>
+</resources>

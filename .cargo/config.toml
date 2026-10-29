@@ -1,0 +1,32 @@
+# cargo configuration for the Android targets.
+#
+# This file exists so `cargo build --target <android-target>` works without
+# cargo-ndk (which configures the same linkers itself). The canonical build
+# path is scripts/build-android-libs.sh (cargo-ndk).
+#
+# Point ANDROID_NDK_HOME at your NDK, or let the paths below match a standard
+# sdkmanager layout via the environment variable.
+
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android24-clang"
+ar = "aarch64-linux-android-ar"
+rustflags = ["-C", "link-arg=-landroid"]
+
+[target.armv7-linux-androideabi]
+linker = "armv7a-linux-androideabi24-clang"
+ar = "armv7a-linux-androideabi-ar"
+rustflags = ["-C", "link-arg=-landroid"]
+
+[target.x86_64-linux-android]
+linker = "x86_64-linux-android24-clang"
+ar = "x86_64-linux-android-ar"
+rustflags = ["-C", "link-arg=-landroid"]
+
+[target.i686-linux-android]
+linker = "i686-linux-android24-clang"
+ar = "i686-linux-android-ar"
+rustflags = ["-C", "link-arg=-landroid"]
+
+# The NDK's clang wrappers live in $NDK/toolchains/llvm/prebuilt/<host>/bin;
+# add it to PATH before building, e.g.:
+#   export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
