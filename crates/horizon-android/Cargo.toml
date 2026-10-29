@@ -31,6 +31,15 @@ desktop = []
 # ALSA; sound lands with the cpal/Oboe workstream) and no controllers
 # (gilrs has no Android backend; the touch overlay replaces them).
 horizon-client = { path = "../horizon-client", default-features = false }
+# The on-device prepare module (prepare.rs): imports the pinned jars and
+# runs horizon-prepare's file steps against the SAF-staged .minecraft.
+horizon-prepare = { path = "../horizon-prepare" }
+# Streaming digests and zip walking for prepare.rs's own steps (the ones
+# horizon-prepare keeps crate-private: tag/damage bundles from the jars,
+# manifest hashing). Same pins as horizon-prepare.
+sha1 = "0.10"
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # NOTE (workspace integration): when this crate is merged into the Horizon
 # workspace, switch these to `workspace = true` entries wherever the parent
 # workspace already manages the version (wgpu/winit in particular), and delete

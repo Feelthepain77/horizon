@@ -39,6 +39,7 @@ mod backend;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod client;
 mod demo;
+pub mod prepare;
 mod touch;
 
 #[cfg(target_os = "android")]

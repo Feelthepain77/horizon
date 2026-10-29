@@ -161,14 +161,11 @@ pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeGpuInfo
 
 /// `HorizonNative.nativeValidateGameFiles(preparedDir: String): Boolean`
 ///
-/// Structural validation of the imported **prepared root** — the directory
-/// the client gets as `--resources`. The one thing the client hard-requires
-/// is `horizon-resources.json` (the manifest horizon-prepare writes); the
-/// raw `versions/`/`assets/` layout is a desktop prepare input and is never
-/// read at play time. Content verification (checksums) belongs to the
-/// horizon-prepare integration, not here.
-///
-/// Emits `validate` events so the launcher can show exactly what's missing.
+/// Inspection of the **prepared root** — the directory the client gets as
+/// `--resources` — against the play-time requirements (the manifest plus the
+/// exporter tables and spot files; see `prepare::REQUIRED_FILES`). Emits
+/// `validate` events (`ok:manifest`, `missing:<name>`, `result:usable` /
+/// `result:incomplete`) so the launcher can show exactly what is missing.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeValidateGameFiles<
     'caller,
@@ -177,51 +174,107 @@ pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeValidat
     _class: JClass<'caller>,
     prepared_dir: JString<'caller>,
 ) -> jboolean {
+    let dir: String = unowned_env
+        .with_env(|env| -> jni::errors::Result<String> { prepared_dir.try_to_string(env) })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "nativeValidateGameFiles: reading path".into()
+        });
+
+    log::info!("validating prepared resources at {dir}");
+    let inspection = crate::prepare::inspect(Path::new(&dir));
+    if inspection.usable {
+        emit_event("validate", "ok:manifest");
+    } else {
+        for name in &inspection.missing {
+            emit_event("validate", &format!("missing:{name}"));
+        }
+    }
+    let usable = inspection.usable;
+    emit_event(
+        "validate",
+        if usable {
+            "result:usable"
+        } else {
+            "result:incomplete"
+        },
+    );
+    if usable {
+        log::info!("prepared resources at {dir} look usable");
+    } else {
+        log::warn!(
+            "prepared resources at {dir} incomplete ({} missing)",
+            inspection.missing.len()
+        );
+    }
+    usable as jboolean
+}
+
+/// `HorizonNative.nativePinnedVersion(): String` — the Minecraft version
+/// this build is pinned to (research-lock.json). Both sides of the boundary
+/// agree on the prepared root's name from it.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativePinnedVersion<'caller>(
+    mut unowned_env: jni::EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> JString<'caller> {
     unowned_env
-        .with_env(|env| -> jni::errors::Result<jboolean> {
-            let dir = prepared_dir.try_to_string(env)?;
-            let path = Path::new(&dir);
-            log::info!("validating prepared resources at {dir}");
-
-            let manifest = path.join("horizon-resources.json");
-            let mut ok = true;
-            if !manifest.is_file() {
-                emit_event("validate", "missing:horizon-resources.json");
-                ok = false;
-            } else {
-                // It must at least be the JSON the client expects to parse.
-                match std::fs::read_to_string(&manifest) {
-                    Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-                        Ok(_) => emit_event("validate", "ok:prepared"),
-                        Err(e) => {
-                            emit_event("validate", &format!("bad:horizon-resources.json:{e}"));
-                            ok = false;
-                        }
-                    },
-                    Err(e) => {
-                        emit_event(
-                            "validate",
-                            &format!("unreadable:horizon-resources.json:{e}"),
-                        );
-                        ok = false;
-                    }
-                }
-            }
-
-            emit_event(
-                "validate",
-                if ok {
-                    "result:usable"
-                } else {
-                    "result:incomplete"
-                },
-            );
-            if ok {
-                log::info!("prepared resources at {dir} look usable");
-            } else {
-                log::warn!("prepared resources at {dir} incomplete");
-            }
-            Ok(ok as jboolean)
+        .with_env(|env| -> jni::errors::Result<JString<'caller>> {
+            Ok(env.new_string(crate::prepare::pinned_version())?)
         })
-        .resolve_with::<LogContextErrorAndDefault, _>(|| "nativeValidateGameFiles".into())
+        .resolve_with::<LogContextErrorAndDefault, _>(|| "nativePinnedVersion".into())
+}
+
+/// `HorizonNative.nativePrepareFromMinecraft(filesRoot: String): String`
+///
+/// Runs the on-device prepare over the SAF-staged `.minecraft` (see
+/// `prepare.rs`) and returns a JSON report:
+/// `{ok, version, error?, missing, prepared_bytes}`. Progress lines arrive
+/// as `prepare` events; the run always finishes with `result:usable` or
+/// `result:incomplete`, so the launcher can close its progress row.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativePrepareFromMinecraft<
+    'caller,
+>(
+    mut unowned_env: jni::EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    files_root: JString<'caller>,
+) -> JString<'caller> {
+    let root: String = unowned_env
+        .with_env(|env| -> jni::errors::Result<String> { files_root.try_to_string(env) })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "nativePrepareFromMinecraft: reading path".into()
+        });
+
+    log::info!("prepare: running the on-device prepare under {root}");
+    let report = {
+        let log = |line: &str| emit_event("prepare", line);
+        match crate::prepare::prepare_from_minecraft(Path::new(&root), &log) {
+            Ok(report) => report,
+            Err(error) => {
+                log::error!("prepare failed: {error}");
+                crate::prepare::PrepareReport::failed(error)
+            }
+        }
+    };
+    emit_event(
+        "prepare",
+        if report.ok {
+            "result:usable"
+        } else {
+            "result:incomplete"
+        },
+    );
+    let json = serde_json::json!({
+        "ok": report.ok,
+        "version": report.version,
+        "error": report.error,
+        "missing": report.missing,
+        "prepared_bytes": report.prepared_bytes,
+    })
+    .to_string();
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<JString<'caller>> { Ok(env.new_string(&json)?) })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "nativePrepareFromMinecraft: returning report".into()
+        })
 }

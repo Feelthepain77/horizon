@@ -75,8 +75,17 @@ class LauncherState(
     var importedBytes: Long by mutableStateOf(files.importedBytes())
         private set
 
-    /** Latest validation events (from Rust) for the checklist UI. */
+    /** Latest validation/prepare events (from Rust) for the checklist UI. */
     var validationLog: List<String> by mutableStateOf(emptyList())
+        private set
+
+    /** True when the prepared root passed the play-time inspection (all
+     *  exporter tables present) — the gate for the PLAY button. */
+    var usable: Boolean by mutableStateOf(false)
+        private set
+
+    /** What the last inspection found missing (file or directory names). */
+    var missing: List<String> by mutableStateOf(emptyList())
         private set
 
     // --- device ---------------------------------------------------------------
@@ -96,12 +105,33 @@ class LauncherState(
         scope.launch { gpuInfo = HorizonNative.gpuInfo() }
         scope.launch {
             HorizonNative.events.collect { event ->
-                if (event.type == "validate") {
-                    validationLog = (validationLog + event.payload).takeLast(12)
-                    if (event.payload.startsWith("result:")) refreshFiles()
+                when (event.type) {
+                    "validate" -> {
+                        validationLog = (validationLog + event.payload).takeLast(12)
+                        if (event.payload.startsWith("missing:")) {
+                            missing = (missing + event.payload.substringAfter("missing:")).takeLast(30)
+                        }
+                        when (event.payload) {
+                            "result:usable" -> {
+                                usable = true
+                                refreshFiles()
+                            }
+                            "result:incomplete" -> {
+                                usable = false
+                                refreshFiles()
+                            }
+                        }
+                    }
+                    "prepare" -> {
+                        // progress lines from the on-device prepare; same pane
+                        validationLog = (validationLog + event.payload).takeLast(12)
+                        if (event.payload.startsWith("result:")) refreshFiles()
+                    }
                 }
             }
         }
+        // Show the current state (usable / what is missing) right at launch.
+        if (files.hasPrepared()) validate()
     }
 
     fun signIn(activity: android.app.Activity) = scope.launch { auth.signIn(activity) }
@@ -114,24 +144,44 @@ class LauncherState(
 
     fun importZip(uri: android.net.Uri) = scope.launch {
         files.importFromZip(uri)
-        refreshFiles()
+        afterImport()
     }
 
     fun importTree(uri: android.net.Uri) = scope.launch {
         files.importFromTree(uri)
-        refreshFiles()
+        afterImport()
     }
 
-    fun validate() = scope.launch {
-        validationLog = emptyList()
-        HorizonNative.validateGameFiles(StorageLayout.preparedDir(context).absolutePath)
+    /** The no-PC path: stage the picked .minecraft and prepare on device. */
+    fun importMinecraft(uri: android.net.Uri) = scope.launch {
+        files.importFromMinecraft(uri)
+        afterImport()
+    }
+
+    /** Refresh after any import and re-run the inspection, so the PLAY gate
+     *  and the missing list always reflect the current state. */
+    private fun afterImport() {
         refreshFiles()
+        validate()
+    }
+
+    fun validate() {
+        if (!files.hasPrepared()) return
+        scope.launch {
+            validationLog = emptyList()
+            missing = emptyList()
+            usable = false
+            HorizonNative.validateGameFiles(StorageLayout.preparedDir(context).absolutePath)
+            refreshFiles()
+        }
     }
 
     fun deleteFiles() {
         files.deleteAll()
         refreshFiles()
         validationLog = emptyList()
+        missing = emptyList()
+        usable = false
     }
 
     /**
@@ -176,5 +226,5 @@ class LauncherState(
         }
     }
 
-    val ready: Boolean get() = hasPrepared
+    val ready: Boolean get() = hasPrepared && usable
 }

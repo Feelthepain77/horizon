@@ -76,10 +76,49 @@ object HorizonNative {
         if (!available) false else nativeValidateGameFiles(gameDir)
     }
 
+    /**
+     * The Minecraft version this build is pinned to (research-lock.json).
+     * Cached; "" when the native library is unavailable (StorageLayout then
+     * degrades to "nothing prepared" — the same state as before a first run).
+     */
+    fun pinnedVersion(): String {
+        synchronized(this) {
+            pinned ?: run {
+                pinned = if (available) {
+                    runCatching { nativePinnedVersion() }.getOrDefault("")
+                } else {
+                    ""
+                }
+                return pinned!!
+            }
+            return pinned!!
+        }
+    }
+
+    /**
+     * Run the on-device prepare over the SAF-staged .minecraft: import and
+     * check the pinned jars, extract the client JAR's resources, copy the
+     * asset store's sounds and overlays. Returns the report JSON
+     * `{ok, version, error?, missing, prepared_bytes}`; progress lines arrive
+     * as `prepare` events and always end with `result:usable|incomplete`.
+     */
+    suspend fun prepareFromMinecraft(filesRoot: String): String = withContext(Dispatchers.IO) {
+        if (!available) {
+            """{"ok":false,"error":"native library not loaded — run scripts/build-android-libs.sh"}"""
+        } else {
+            nativePrepareFromMinecraft(filesRoot)
+        }
+    }
+
     // --- native declarations (signatures must match jni_bridge.rs) ----------
 
     private external fun nativeConfigure(json: String): Boolean
     private external fun nativeGetVersion(): String
     private external fun nativeGpuInfo(): String
     private external fun nativeValidateGameFiles(gameDir: String): Boolean
+    private external fun nativePinnedVersion(): String
+    private external fun nativePrepareFromMinecraft(filesRoot: String): String
+
+    /** Cache for [pinnedVersion]. */
+    private var pinned: String? = null
 }

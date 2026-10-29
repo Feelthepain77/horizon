@@ -3,6 +3,7 @@ package dev.horizon.android.setup
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import dev.horizon.android.game.HorizonNative
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -12,28 +13,46 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 /**
  * Canonical storage layout for game data inside the app's private storage:
  *
  * ```
- * files/prepared/     the prepared resources root — a horizon-resources.json
- *                     at its top (what the client's --resources needs). The
- *                     desktop launcher's "Export for Android" action produces
- *                     it after running horizon-prepare on the PC.
- * files/home/         the game home: cwd for the client run + HORIZON_HOME.
- *                     options.txt, saves/, logs/ and .horizon-cache are
- *                     created there by the client itself.
- * files/accounts/     local accounts + the per-launch session file.
- * files/imports/      staging dir for in-flight imports.
+ * files/prepare-root/   the prepare root: research-lock.json (written by
+ *                       Rust from the build's copy), .local/minecraft/<version>
+ *                       (imported, verified jars) and .local/horizon-client/
+ *                       <version> — THE prepared resources root, what the
+ *                       client gets as --resources. The on-device prepare and
+ *                       the portable-export import write the same directory,
+ *                       so the two paths compose.
+ * files/minecraft-staging/  the SAF-copied .minecraft: versions/<version>,
+ *                       assets, libraries, the server jar; saves/ is copied
+ *                       into the game home. Everything else (runtime, logs,
+ *                       screenshots, mods, resourcepacks) stays behind.
+ * files/home/           the game home: cwd for the client run + HORIZON_HOME.
+ *                       options.txt, saves/, logs/ and .horizon-cache are
+ *                       created there by the client itself.
+ * files/accounts/       local accounts + the per-launch session file.
+ * files/imports/        staging dir for in-flight portable-export imports.
  * ```
  *
  * Rust receives these absolute paths via `HorizonNative.configure` — no SAF
  * dance on the game side.
  */
 object StorageLayout {
-    /** The prepared resources root (`--resources`). */
-    fun preparedDir(context: Context): File = File(context.filesDir, "prepared")
+    /** The prepare root: research-lock.json + the imported jars + the
+     *  prepared resources (see [preparedDir]). */
+    fun prepareRoot(context: Context): File = File(context.filesDir, "prepare-root")
+
+    /** The prepared resources root (`--resources`), named by the pinned
+     *  version exactly as horizon-prepare names it, so the on-device prepare
+     *  and the portable-export import land in the same place. */
+    fun preparedDir(context: Context): File =
+        File(File(File(prepareRoot(context), ".local"), "horizon-client"), HorizonNative.pinnedVersion())
+
+    /** The SAF-staged .minecraft the on-device prepare reads. */
+    fun minecraftStaging(context: Context): File = File(context.filesDir, "minecraft-staging")
 
     /** The game home (cwd + HORIZON_HOME). */
     fun homeDir(context: Context): File = File(context.filesDir, "home")
@@ -58,15 +77,18 @@ data class ImportState(
 /**
  * Imports the **prepared resources** the client plays from.
  *
- * Horizon never downloads game files (same policy as the desktop launcher):
- * the user runs the desktop launcher on their PC, which prepares the game
- * data there (horizon-prepare) and packs it into a **portable export**. This
- * manager unpacks such an export — a zip or a folder — into
- * `files/prepared`, locating the prepared root by its
- * `horizon-resources.json` manifest wherever the export put it.
+ * Two paths compose into the same prepared root:
  *
- * The raw `versions/`/`assets/`/`libraries/` layout is a *desktop prepare
- * input*; the client never reads it at play time, so it is not imported.
+ * * a **portable export** — a zip or folder the desktop launcher produced
+ *   after running horizon-prepare there (unpacked by its
+ *   `horizon-resources.json` manifest, wherever the export put it);
+ * * the player's own **.minecraft** — staged over SAF and prepared on
+ *   device by Rust (see `importFromMinecraft`): the file steps run on the
+ *   phone, the Java-25 exporter tables arrive through the export path once.
+ *
+ * Horizon never downloads game files (same policy as the desktop launcher).
+ * The raw `versions/`/`assets/`/`libraries/` layout is a prepare *input*;
+ * the client never reads it at play time.
  */
 class GameFilesManager(private val context: Context) {
 
@@ -85,10 +107,153 @@ class GameFilesManager(private val context: Context) {
         .filter { it.isFile }.sumOf { it.length() }
 
     fun deleteAll() {
-        preparedDir.deleteRecursively()
+        // the whole prepare root (jars + prepared resources) and the staging
+        StorageLayout.prepareRoot(context).deleteRecursively()
+        StorageLayout.minecraftStaging(context).deleteRecursively()
         StorageLayout.importsDir(context).deleteRecursively()
         _importState.value = ImportState()
+        lastReport = null
     }
+
+    // ----------------------------------------------------------- .minecraft --
+
+    /** The latest on-device prepare report (null before the first import). */
+    var lastReport: PrepareReport? = null
+        private set
+
+    /** The prepare outcome, as Rust reports it (see jni_bridge.rs). */
+    data class PrepareReport(
+        val ok: Boolean,
+        val version: String,
+        val error: String?,
+        val missing: List<String>,
+        val preparedBytes: Long,
+    )
+
+    /**
+     * Import the player's own .minecraft folder — the no-PC path. Stages the
+     * parts the prepare reads (the pinned version's dir, assets, libraries,
+     * root-level jars that may be the server jar; saves into the game home),
+     * then runs the on-device prepare in Rust. Progress lines from the
+     * prepare arrive as `prepare` events on HorizonNative.events.
+     */
+    suspend fun importFromMinecraft(uri: Uri): Unit = withContext(Dispatchers.IO) {
+        _importState.value = ImportState(running = true)
+        try {
+            val resolver = context.contentResolver
+            val root = findMinecraftRoot(resolver, uri, 0)
+                ?: fail(
+                    "the picked folder holds no .minecraft (a directory with versions/ and " +
+                        "assets/, searched three levels deep)"
+                )
+            stageMinecraft(resolver, root)
+            _importState.value = _importState.value.copy(running = false)
+
+            // Hand off to Rust; the report says what (if anything) is left.
+            val report = parseReport(
+                HorizonNative.prepareFromMinecraft(context.filesDir.absolutePath)
+            )
+            lastReport = report
+            if (report?.error != null) {
+                _importState.value = ImportState(error = report.error)
+            }
+        } catch (e: Exception) {
+            coroutineContext.ensureActive()
+            _importState.value = ImportState(error = e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    /** Copy the parts of a .minecraft the prepare reads into the staging dir. */
+    private fun stageMinecraft(resolver: android.content.ContentResolver, root: Uri) {
+        val staging = StorageLayout.minecraftStaging(context)
+        staging.mkdirs()
+        var copied = 0L
+        val onBytes = { bytes: Long, file: String ->
+            copied += bytes
+            _importState.value = _importState.value.copy(bytes = copied, currentFile = file)
+        }
+
+        // assets and libraries wholesale: the prepare reads the index and
+        // objects from assets; the importer verifies libraries against the
+        // version JSON.
+        for (name in listOf("assets", "libraries")) {
+            childDir(resolver, root, name)?.let { dir ->
+                copyDocumentTree(resolver, dir, File(staging, name), onBytes)
+            }
+        }
+
+        // The pinned version's dir (jar + json). A .minecraft without it gets
+        // a version-specific message from the prepare itself.
+        val version = HorizonNative.pinnedVersion()
+        val versions = childDir(resolver, root, "versions")
+            ?: fail("the .minecraft has no versions/ directory")
+        val versionDir = childDir(resolver, versions, version)
+            ?: fail("the .minecraft has no versions/$version — Horizon is pinned to Minecraft $version")
+        copyDocumentTree(resolver, versionDir, File(File(staging, "versions"), version), onBytes)
+
+        // Root-level jars: the server jar the player dropped in (Rust's sha1
+        // check against research-lock.json sorts the candidates out).
+        for (child in SafUtil.listChildren(resolver, root)) {
+            val name = SafUtil.displayName(resolver, child) ?: continue
+            if (name.endsWith(".jar") && !SafUtil.isDirectory(resolver, child)) {
+                copyDocumentTree(resolver, child, File(staging, name), onBytes)
+            }
+        }
+
+        // saves → the game home, so the worlds come along.
+        StorageLayout.homeDir(context).mkdirs()
+        childDir(resolver, root, "saves")?.let { dir ->
+            copyDocumentTree(resolver, dir, File(StorageLayout.homeDir(context), "saves"), onBytes)
+        }
+    }
+
+    /** The directory that directly holds versions/ and assets/ — a .minecraft —
+     *  searched up to [depth] levels below the picked folder (the picker often
+     *  returns a parent of the real one). */
+    private fun findMinecraftRoot(
+        resolver: android.content.ContentResolver,
+        dir: Uri,
+        depth: Int,
+    ): Uri? {
+        if (depth > 3) return null
+        val children = SafUtil.listChildren(resolver, dir)
+        fun holds(name: String) = children.any {
+            SafUtil.displayName(resolver, it) == name && SafUtil.isDirectory(resolver, it)
+        }
+        if (holds("versions") && holds("assets")) return dir
+        for (child in children) {
+            if (SafUtil.isDirectory(resolver, child)) {
+                findMinecraftRoot(resolver, child, depth + 1)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /** The named subdirectory of a SAF directory, or null when absent. */
+    private fun childDir(
+        resolver: android.content.ContentResolver,
+        dir: Uri,
+        name: String,
+    ): Uri? = SafUtil.listChildren(resolver, dir).firstOrNull {
+        SafUtil.displayName(resolver, it) == name && SafUtil.isDirectory(resolver, it)
+    }
+
+    /** The report JSON from Rust (see jni_bridge.rs). */
+    private fun parseReport(json: String): PrepareReport? = runCatching {
+        val obj = JSONObject(json)
+        val missing = buildList {
+            obj.optJSONArray("missing")?.let { array ->
+                for (index in 0 until array.length()) add(array.optString(index))
+            }
+        }
+        PrepareReport(
+            ok = obj.optBoolean("ok"),
+            version = obj.optString("version"),
+            error = if (obj.isNull("error")) null else obj.optString("error"),
+            missing = missing,
+            preparedBytes = obj.optLong("prepared_bytes"),
+        )
+    }.getOrNull()
 
     // ------------------------------------------------------------------ zip --
 

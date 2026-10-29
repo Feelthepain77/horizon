@@ -958,6 +958,16 @@ fn steps(
     )
 }
 
+/// The JAR-extraction step of a full preparation, exposed for the Android port
+/// (horizon-android's on-device prepare): it runs there because it is pure
+/// file work, while the exporter steps need a JVM Android cannot provide.
+/// `indexed=None` writes every JAR member; the standalone sounds / panorama /
+/// fonts / packs / languages overlays run afterwards and replace the JAR's
+/// placeholders with the asset store's versions.
+pub fn extract_jar_resources(jar: &Path, root: &Path) -> Result<(Value, usize), String> {
+    extract_client_resources(jar, root, None)
+}
+
 /// Check existing JAR assets by their ZIP size/CRC without inflating every member again.
 /// Indexed panorama/font/language replacements have stronger SHA-1 checks and take precedence.
 fn extract_client_resources(

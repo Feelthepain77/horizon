@@ -1378,13 +1378,17 @@ dependencies = [
  "android_logger",
  "bytemuck",
  "horizon-client",
+ "horizon-prepare",
  "jni 0.22.4",
  "log",
  "pollster",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2",
  "wgpu",
  "winit",
+ "zip",
 ]
 
 [[package]]

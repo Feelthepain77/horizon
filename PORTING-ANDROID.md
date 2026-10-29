@@ -23,7 +23,7 @@ the Gradle project produced real debug and release APKs with AGP 9.5.
 | `android/` — Kotlin Compose launcher (MSAL sign-in, game-file import via SAF, settings, device info) + NativeActivity host | **Builds.** `assembleDebug` + `assembleRelease` verified with AGP 9.5.0 / Gradle 9.8.2 / Kotlin 2.4.21 |
 | Native `.so` link step (cargo-ndk) | Scripted, exercised in CI; not linked in this sandbox (no NDK) |
 | `horizon-client` actually rendering on device | **Not started** — that's the porting work this handbook walks you through |
-| On-device `horizon-prepare` | **Blocked on the JDK-25 step** — see § 7 |
+| On-device prepare from `.minecraft` | **Ships** — file steps run on the phone (`prepare.rs`); the Java-25 exporter tables arrive via a **one-time** portable-export import; see § 7 |
 
 The placeholder renderer is deliberately honest: it boots the exact surface
 lifecycle path the real client needs (window → Vulkan surface → pipeline →
@@ -80,7 +80,9 @@ Key decisions:
 | `nativeConfigure(json): Boolean` | `..._nativeConfigure` | paths + settings, caches event class |
 | `nativeGetVersion(): String` | `..._nativeGetVersion` | crate version |
 | `nativeGpuInfo(): String` | `..._nativeGpuInfo` | adapter string after first boot |
-| `nativeValidateGameFiles(dir): Boolean` | `..._nativeValidateGameFiles` | structural checks, emits `validate` events |
+| `nativeValidateGameFiles(dir): Boolean` | `..._nativeValidateGameFiles` | play-time inspection, emits `validate` events |
+| `nativePinnedVersion(): String` | `..._nativePinnedVersion` | the MC version research-lock.json pins |
+| `nativePrepareFromMinecraft(root): String` | `..._nativePrepareFromMinecraft` | on-device prepare; emits `prepare` events, returns the report JSON |
 | `onNativeEvent(json)` (static) | `emit_event` | called from Rust worker threads |
 
 Keep the two files in lockstep. The JSON contract is serde-driven
@@ -288,63 +290,70 @@ as before, and `cargo run -p horizon-client` is unchanged.
 
 ---
 
-## 7. The prepare problem (`horizon-prepare` + JDK 25)
+## 7. The prepare problem (`horizon-prepare` + JDK 25) — the split pipeline that ships
 
 The desktop flow is:
 
 ```
 MS sign-in → prepare files from the user's own MC Java 26.3 install
-           → horizon-prepare (runs a server jar under JDK 25, checksums vs
-             research-lock.json) → .local/ prepared resources → play
+           → horizon-prepare (runs the exporter tables under JDK 25, checksums vs
+             research-lock.json) → .local/horizon-client/<version> → play
 ```
 
-Horizon **never downloads game files**, and `horizon-prepare` needs a real
-JDK 25 at prepare time. Android cannot run arbitrary JDK-25 jars (ART is not
-a JVM), and bundling a JVM in an APK is not viable. Three options, in the
-order the port should pursue them:
+Horizon **never downloads game files**, and a full prepare needs a real JDK 25
+for the ~19 exporter tables (`facts.json`, `model-states.json`,
+`cached-collision.nbt`, `gameplay-facts.json`, …) that JVM code calling
+Mojang's own classes produces. Android cannot run those (ART will not load
+Java-25 class files, and targetSdk 29+ forbids exec'ing a JVM from app
+storage), and bundling a JVM in an APK is not viable (~200 MB, Pojav-scale
+engineering, store-policy friction).
 
+**What ships (2026-10) is a split pipeline.**
 
-**Status:** Option A is the implemented import path. The Android launcher
-imports a portable export by locating `horizon-resources.json` (the
-prepared-root manifest the client requires for `--resources`); see
-`GameFilesManager`. The desktop launcher's "Export for Android" button is
-still upstream work — until it exists, produce the export by preparing on
-the PC (`horizon-prepare`) and zipping the `.local/horizon-client/<version>`
-directory (the one containing `horizon-resources.json`).
-### Option A — Portable export (recommended, ships first)
+* **On-device, on the phone** (`crates/horizon-android/src/prepare.rs` +
+  `GameFilesManager.importFromMinecraft`): the launcher asks for the player's
+  `.minecraft` **on launch** (no PC in the loop), SAF-stages the parts the
+  prepare reads (`versions/<version>/`, `assets/`, `libraries/`, root-level
+  jars; `saves/` is copied into the game home), then Rust imports and verifies
+  the pinned jars (sha1 against research-lock.json), extracts the client JAR's
+  `assets/` + `data/` + `pack.png`, copies the asset store's sounds and the
+  panorama/Unifont/built-in-pack/language overlays, and writes the reference
+  block-tag and damage bundles. The server jar (`server-<version>.jar`,
+  minecraft.net → download server jar, any browser) must sit in the picked
+  folder.
+* **Once, from anywhere** — the Java-25 exporter tables arrive through a
+  **portable export** import (a zip or folder containing the prepared root
+  marked by `horizon-resources.json`; produce it by preparing on any desktop
+  that ran the pinned version and zipping `.local/horizon-client/<version>`).
+  Any export of the pinned version works: the tables are deterministic
+  outputs of the pinned jars.
 
-The desktop launcher gains an **"Export for Android"** action:
+Both paths write the **same** prepared root
+(`files/prepare-root/.local/horizon-client/<version>`), so they compose.
+Preparation is incremental — hash-keyed steps are skipped while their inputs
+and outputs are unchanged — so **the export is needed exactly once, ever**:
+every later on-device prepare re-derives everything else from `.minecraft`
+alone and leaves the exporter entries in `horizon-resources.json` untouched.
+The launcher gates PLAY on the inspection (`prepare::REQUIRED_FILES`) and
+shows exactly which tables are missing while any are.
 
-1. Runs the normal prepare on the PC (`.local/` output).
-2. Zips `versions/` + `assets/` + `libraries/` + `local/` (the prepared
-   output) + a `prepared.json` manifest (format version, MC version,
-   checksums, export date).
-3. User transfers the zip to the phone (USB, cloud, local network —
-   anything), taps **Import portable export** in the Android launcher.
+**Storage cost of the no-PC path:** staging (the copied `.minecraft` parts),
+the prepared root (JAR resources + ~380 MB of sounds) and the importer's
+verified jar copies land around 2–2.5 GB. `Delete files` clears all three.
 
-The Android side is already built: `GameFilesManager.importFromZip` unpacks
-exactly this layout into `files/game` + `files/local`, and validation
-recognizes `prepared.json`. The desktop-side export button is a small Tauri/
-launcher feature — file an upstream issue or PR.
+The desktop launcher's "Export for Android" button is still upstream work —
+until it exists, produce the export by preparing on the PC (`horizon-prepare`)
+and zipping the `.local/horizon-client/<version>` directory.
 
-**Size note:** a full export is multi-GB. Two mitigations for later: split
-the export into `base` (versions + libraries) and `assets` (the bulk), and
-document that `assets/` can be re-exported alone after resource-pack changes.
+### What was rejected
 
-### Option B — Pure-Rust on-device prepare
-
-`horizon-prepare`'s JDK dependency exists to run/parse the server jar for
-parity data. A pure-Rust reimplementation of those extraction steps removes
-the JVM entirely and makes on-device prepare possible (raw `.minecraft`
-import → prepare on the phone). This is real upstream engineering — the
-parsing logic is shared, only the execution/verification strategy differs.
-Track it as its own workstream; the `nativeValidateGameFiles` structural
-checks are the natural seam to extend.
-
-### Option C — Bundled headless JDK
-
-Not recommended. ~200MB, Play Store policy friction, and Option B kills the
-need for it.
+* **Bundled headless JDK**: ~200 MB, Play Store policy friction, and the
+  split pipeline reaches playability without it.
+* **Pure-Rust reimplementation of the exporter tables**: real upstream
+  engineering (upstream built the exporters precisely so vanilla behavior
+  comes from Mojang's own code); it would remove the one-time export, but it
+  is not needed to play. The `prepare::REQUIRED_FILES` seam is where it
+  would land if ever attempted.
 
 ---
 
@@ -529,7 +538,7 @@ Every entry below was hit and fixed while building this scaffold.
 | 1 | `horizon-client` boots on device: menus render | § 6.1 wiring; limits/feature audit; back-key verification. |
 | 2 | World render at reduced distance | Preset mapping, chunk-budget tuning on-device. |
 | 3 | Touch overlay in-game via client input layer | § 8 mapping; overlay drawn by client UI renderer. |
-| 4 | Prepare pipeline | Desktop "Export for Android" (Option A) then evaluate Option B. |
+| 4 | Prepare pipeline | **Done (split):** on-device file steps from `.minecraft` + one-time portable export for the exporter tables; see § 7. |
 | 5 | Entitlements + multiplayer | § 9 chain, LAN + servers. |
 | 6 | Release engineering | Signed AAB, Play asset delivery (split the export), F-Droid notes, staged rollout. |
 

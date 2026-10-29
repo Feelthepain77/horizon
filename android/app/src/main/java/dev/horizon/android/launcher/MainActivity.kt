@@ -83,6 +83,17 @@ private fun LauncherScreen() {
     val state = remember { LauncherState(context, scope) }
     val authState by state.auth.state.collectAsState()
 
+    // On launch, with nothing imported yet: ask for the .minecraft folder at
+    // once — the primary no-PC path. Cancelling the picker keeps the manual
+    // card below as the fallback.
+    val minecraftPicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            uri?.let { state.importMinecraft(it) }
+        }
+    LaunchedEffect(Unit) {
+        if (!state.hasPrepared) minecraftPicker.launch(null)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -100,8 +111,9 @@ private fun LauncherScreen() {
         LocalAccountsSection(state)
         if (state.hasPrepared) {
             ReadySection(state)
-        } else {
-            ImportSection(state)
+        }
+        if (!state.hasPrepared || !state.usable) {
+            ImportSection(state, onPickMinecraft = { minecraftPicker.launch(null) })
         }
         SettingsSection(state)
         DeviceSection(state)
@@ -153,7 +165,7 @@ private fun SignInSection(state: LauncherState) {
 }
 
 @Composable
-private fun ImportSection(state: LauncherState) {
+private fun ImportSection(state: LauncherState, onPickMinecraft: () -> Unit) {
     val zipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { state.importZip(it) }
     }
@@ -165,18 +177,30 @@ private fun ImportSection(state: LauncherState) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Game files", style = MaterialTheme.typography.titleLarge)
             Text(
-                "Import the portable export from the desktop launcher (it runs horizon-prepare on the PC " +
-                    "and packs the result). Horizon never downloads game files.",
+                "Point Horizon at your .minecraft folder: the pinned jars are imported and " +
+                    "checked, the client JAR's resources extracted and the asset store copied — " +
+                    "all on the phone. The ${"server-"}${HorizonNative.pinnedVersion()}.jar (minecraft.net → " +
+                    "download server jar) goes into the same folder.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Button(onClick = {
-                zipPicker.launch(arrayOf("application/zip"))
-            }, modifier = Modifier.fillMaxWidth()) {
-                Text("Import portable export (.zip)")
+            Button(onClick = onPickMinecraft, modifier = Modifier.fillMaxWidth()) {
+                Text("Select .minecraft folder")
             }
-            OutlinedButton(onClick = { treePicker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
-                Text("Import export folder")
+            Text(
+                "…or, if you have a portable export from a desktop:",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { zipPicker.launch(arrayOf("application/zip")) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("Export (.zip)") }
+                OutlinedButton(
+                    onClick = { treePicker.launch(null) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("Export folder") }
             }
             ImportProgress(state)
         }
@@ -286,6 +310,21 @@ private fun ImportProgress(state: LauncherState) {
             color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodySmall,
         )
+    } else if (state.validationLog.isNotEmpty()) {
+        // The on-device prepare's progress lines (it runs for minutes).
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            state.validationLog.takeLast(3).forEach { line ->
+                Text(
+                    line.take(72),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (line.startsWith("result:")) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -295,7 +334,16 @@ private fun ReadySection(state: LauncherState) {
     Card {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Ready", style = MaterialTheme.typography.titleLarge)
-            if (profile == null) {
+            if (!state.usable) {
+                Text(
+                    "Resources incomplete — ${state.missing.size} item(s) missing: the Java-25 " +
+                        "exporter tables Android cannot run. Import a portable export once " +
+                        "(any ${HorizonNative.pinnedVersion()} export works) to finish; after " +
+                        "that, re-prepares never need it again.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            } else if (profile == null) {
                 Text(
                     "Pick a Microsoft account or a local account to play.",
                     style = MaterialTheme.typography.bodySmall,
@@ -313,11 +361,14 @@ private fun ReadySection(state: LauncherState) {
                 onClick = { state.play() },
                 modifier = Modifier.fillMaxWidth().height(56.dp),
                 colors = ButtonDefaults.buttonColors(),
-                enabled = dev.horizon.android.game.HorizonNative.available && profile != null,
+                enabled = dev.horizon.android.game.HorizonNative.available && profile != null && state.usable,
             ) {
                 Text(
-                    if (dev.horizon.android.game.HorizonNative.available) "PLAY"
-                    else "PLAY - native library missing",
+                    when {
+                        !dev.horizon.android.game.HorizonNative.available -> "PLAY - native library missing"
+                        !state.usable -> "PLAY — resources incomplete"
+                        else -> "PLAY"
+                    },
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
                 )
