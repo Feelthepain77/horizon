@@ -100,6 +100,13 @@ class GameFilesManager(private val context: Context) {
     /** The file that marks a directory as the prepared resources root. */
     private val mark = "horizon-resources.json"
 
+    /** The fix when the picked thing is not an export: this fork's CI builds
+     *  one on every green android run — say where it is. */
+    private val notAnExportAdvice: String
+        get() = "not a portable export. Download the horizon-portable-export-" +
+            "${HorizonNative.pinnedVersion()} artifact from the latest successful android run " +
+            "(github.com/Feelthepain77/horizon, Actions tab), then pick that zip here"
+
     /** True when the prepared root is importable/playable right now. */
     fun hasPrepared(): Boolean = File(preparedDir, mark).isFile
 
@@ -260,33 +267,73 @@ class GameFilesManager(private val context: Context) {
     /**
      * Import a portable-export zip: the entry tree under the directory that
      * holds `horizon-resources.json` (wherever in the zip it lives — the
-     * export may wrap it in a top-level folder) goes to `files/prepared`.
+     * export may wrap it in a top-level folder) goes to the prepared root.
+     *
+     * A zip handed over by the system picker is not always the export
+     * itself: GitHub wraps every artifact download in an extra zip, and file
+     * managers do similar things. Rather than making the player unwrap by
+     * hand, zips found inside a zip that has no manifest are extracted and
+     * tried in turn, a few levels deep — picking the artifact exactly as
+     * downloaded just works.
      */
     suspend fun importFromZip(uri: Uri): Unit = withContext(Dispatchers.IO) {
         _importState.value = ImportState(running = true)
         try {
-            // First pass: find the root prefix (shallowest directory holding
-            // the manifest). Second pass: copy everything under it.
-            var rootPrefix: String? = null
-            context.contentResolver.openInputStream(uri)!!.buffered(1 shl 16).use { input ->
-                ZipImporter(input).import { entry, _ ->
-                    // The directory part of the manifest's entry is the root
-                    // prefix ("" when the manifest sits at the zip's root).
-                    if (rootPrefix == null && entry.substringAfterLast('/') == mark) {
-                        rootPrefix = entry.substringBefore(mark)
-                    }
-                }
-            }
-            val prefix = rootPrefix ?: fail("no $mark in the export — prepare on the PC first, then Export for Android")
-            context.contentResolver.openInputStream(uri)!!.buffered(1 shl 16).use { input ->
-                ZipImporter(input).import { entry, stream ->
-                    if (entry.startsWith(prefix)) copyEntry(entry.removePrefix(prefix), stream)
-                }
-            }
-            _importState.value = ImportState(running = false)
+            importZipLevel({ context.contentResolver.openInputStream(uri)!! }, "the zip", 0)
+            _importState.value = _importState.value.copy(running = false)
         } catch (e: Exception) {
             coroutineContext.ensureActive() // rethrow cancellation as-is
             _importState.value = ImportState(error = e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    /** One zip level: import it when it holds the manifest, otherwise try the
+     *  zips nested inside it. */
+    private fun importZipLevel(open: () -> InputStream, name: String, depth: Int) {
+        // First pass: find the root prefix (shallowest directory holding
+        // the manifest). Second pass: copy everything under it.
+        var rootPrefix: String? = null
+        open().buffered(1 shl 16).use { input ->
+            ZipImporter(input).import { entry, _ ->
+                // The directory part of the manifest's entry is the root
+                // prefix ("" when the manifest sits at the zip's root).
+                if (rootPrefix == null && entry.substringAfterLast('/') == mark) {
+                    rootPrefix = entry.substringBefore(mark)
+                }
+            }
+        }
+        val prefix = rootPrefix
+        if (prefix == null) {
+            if (depth >= 3) fail("no $mark in $name, even nested — $notAnExportAdvice")
+            importNestedZips(open, name, depth)
+            return
+        }
+        open().buffered(1 shl 16).use { input ->
+            ZipImporter(input).import { entry, stream ->
+                if (entry.startsWith(prefix)) copyEntry(entry.removePrefix(prefix), stream)
+            }
+        }
+    }
+
+    /** Extract every zip nested in this level and import those, one level
+     *  down (the GitHub artifact wrapper is exactly one such level). */
+    private fun importNestedZips(open: () -> InputStream, name: String, depth: Int) {
+        val nested = File(StorageLayout.importsDir(context), "nested-${System.nanoTime()}")
+        nested.mkdirs()
+        try {
+            open().buffered(1 shl 16).use { input ->
+                ZipImporter(input).import { entry, stream ->
+                    if (entry.endsWith(".zip", ignoreCase = true)) {
+                        val safe = entry.substringAfterLast('/').replace(Regex("[^A-Za-z0-9._-]"), "_")
+                        File(nested, safe).outputStream().use { output -> stream.copyTo(output) }
+                    }
+                }
+            }
+            val zips = nested.listFiles().orEmpty().filter { it.isFile }.sortedBy { it.name }
+            if (zips.isEmpty()) fail("no $mark in $name — $notAnExportAdvice")
+            for (zip in zips) importZipLevel({ zip.inputStream() }, zip.name, depth + 1)
+        } finally {
+            nested.deleteRecursively()
         }
     }
 
@@ -326,7 +373,7 @@ class GameFilesManager(private val context: Context) {
             // The directory holding the manifest is the prepared root; copy
             // that whole subtree.
             val root = findDirectoryHolding(resolver, uri, 0) { it == mark }
-                ?: fail("no $mark in the folder — prepare on the PC first, then Export for Android")
+                ?: fail("no $mark in the folder — $notAnExportAdvice")
             var copied = 0L
             copyDocumentTree(resolver, root, preparedDir) { bytes, file ->
                 copied += bytes

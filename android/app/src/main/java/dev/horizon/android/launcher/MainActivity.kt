@@ -188,13 +188,25 @@ private fun ImportSection(state: LauncherState, onPickMinecraft: () -> Unit) {
                 Text("Select .minecraft folder")
             }
             Text(
-                "…or, if you have a portable export from a desktop:",
+                "…or import the portable export (the horizon-portable-export-" +
+                    "${HorizonNative.pinnedVersion()} artifact from the repo's Actions, or a " +
+                    "desktop export — pick the downloaded zip as-is):",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
-                    onClick = { zipPicker.launch(arrayOf("application/zip")) },
+                    onClick = {
+                        // octet-stream too: some file managers label zips that
+                        // way, and the picker would then hide them.
+                        zipPicker.launch(
+                            arrayOf(
+                                "application/zip",
+                                "application/x-zip-compressed",
+                                "application/octet-stream",
+                            )
+                        )
+                    },
                     modifier = Modifier.weight(1f),
                 ) { Text("Export (.zip)") }
                 OutlinedButton(

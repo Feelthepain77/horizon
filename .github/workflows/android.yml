@@ -133,6 +133,8 @@ jobs:
             --server-jar "$RUNNER_TEMP/minecraft/server-$version.jar"
 
       - name: Pack the export (only what the phone cannot make)
+        # This zip exists for the verification step: it carries exactly the
+        # kept subset. The artifact itself uploads the tree (below).
         run: |
           set -euo pipefail
           # The phone's own prepare already extracted the client JAR's
@@ -152,11 +154,27 @@ jobs:
       - name: Verify the export against the Android client's requirements
         run: python3 scripts/verify-portable-export.py "$RUNNER_TEMP/portable-export-$version.zip"
 
+      - name: Stage the tree the artifact uploads
+        # GitHub wraps every artifact download in another zip, and the
+        # launcher's import takes the downloaded file as-is — including on
+        # builds that predate its nested-zip unwrap. So the artifact carries
+        # the prepared tree itself, with the same excludes the packed zip
+        # verified above applied to it.
+        run: |
+          set -euo pipefail
+          root=".local/horizon-client/$version"
+          rm -rf "$root/assets" "$root/data" "$root/classes" "$root/client-classes"
+          find "$root" -name '*.log' -delete
+          rm -rf "$RUNNER_TEMP/export-tree"
+          mkdir -p "$RUNNER_TEMP/export-tree"
+          cp -a "$root" "$RUNNER_TEMP/export-tree/$version"
+          du -sh "$RUNNER_TEMP/export-tree/$version"
+
       - name: Upload the portable export
         uses: actions/upload-artifact@v4
         with:
           name: horizon-portable-export-${{ env.version }}
-          path: ${{ runner.temp }}/portable-export-${{ env.version }}.zip
+          path: ${{ runner.temp }}/export-tree/${{ env.version }}
           retention-days: 14
           if-no-files-found: error
 
