@@ -158,11 +158,12 @@ class GameFilesManager(private val context: Context) {
         _importState.value = ImportState(running = true)
         try {
             val resolver = context.contentResolver
-            val manifest = findDocumentTree(resolver, uri, 0) { it == mark }
+            // The directory holding the manifest is the prepared root; copy
+            // that whole subtree.
+            val root = findDirectoryHolding(resolver, uri, 0) { it == mark }
                 ?: fail("no $mark in the folder — prepare on the PC first, then Export for Android")
-            // The manifest's parent directory is the root; copy that subtree.
             var copied = 0L
-            copyDocumentTree(resolver, manifest.parent!!, preparedDir) { bytes, file ->
+            copyDocumentTree(resolver, root, preparedDir) { bytes, file ->
                 copied += bytes
                 _importState.value = _importState.value.copy(bytes = copied, currentFile = file)
             }
@@ -173,19 +174,22 @@ class GameFilesManager(private val context: Context) {
         }
     }
 
-    /** Depth-limited search for a document whose name satisfies [want]. */
-    private fun findDocumentTree(
+    /**
+     * Depth-limited search: the directory whose *direct child* is a document
+     * named by [want] (SAF `Uri` has no parent, so the search carries it).
+     */
+    private fun findDirectoryHolding(
         resolver: android.content.ContentResolver,
-        uri: Uri,
+        dir: Uri,
         depth: Int,
         want: (String) -> Boolean,
     ): Uri? {
         if (depth > 4) return null
-        for (child in SafUtil.listChildren(resolver, uri)) {
+        for (child in SafUtil.listChildren(resolver, dir)) {
             val name = SafUtil.displayName(resolver, child) ?: continue
-            if (want(name)) return child
+            if (want(name)) return dir
             if (SafUtil.isDirectory(resolver, child)) {
-                findDocumentTree(resolver, child, depth + 1, want)?.let { return it }
+                findDirectoryHolding(resolver, child, depth + 1, want)?.let { return it }
             }
         }
         return null
