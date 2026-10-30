@@ -62,6 +62,13 @@ export CC_aarch64_linux_android="$TOOLCHAIN_BIN/aarch64-linux-android35-clang"
 export AR_aarch64_linux_android="$TOOLCHAIN_BIN/llvm-ar"
 export RANLIB_aarch64_linux_android="$TOOLCHAIN_BIN/llvm-ranlib"
 
+# 16 KB page alignment, made explicit instead of relying on the NDK's lld
+# default (r28+ for arm64) or on rustc's target spec: devices that run 16 KB
+# pages refuse to mmap a 4 KB-aligned .so, and Android warns about apps that
+# ship one even on 4 KB devices ("isn't compatible with the latest Android
+# version"). A 16 KB-aligned library loads on both.
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384"
+
 rustup target list --installed | grep -q "^aarch64-linux-android$" || rustup target add aarch64-linux-android
 
 # Map cargo profile to cargo-ndk profile flag.

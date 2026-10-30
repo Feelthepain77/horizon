@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "dev.horizon.android"
-    // Compose 1.12 (BOM 2026.09.00) requires API 37; targetSdk stays 36.
+    // Compose 1.12 (BOM 2026.09.00) requires API 37.
     compileSdk = 37
     compileSdkMinor = 2
 
@@ -13,7 +13,12 @@ android {
         applicationId = "dev.horizon.android"
         // Android 15 per the porting decision (Vulkan 1.1 baseline hardware).
         minSdk = 35
-        targetSdk = 36
+        // Target the newest platform (Android 17): devices post "isn't
+        // compatible with the latest Android version" notices for apps that
+        // sit a version behind, and nothing in this app (no PendingIntents,
+        // no notifications, no foreground services; Compose UI + a
+        // NativeActivity game) needs the older behavior.
+        targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
 
