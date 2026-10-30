@@ -177,12 +177,12 @@ private fun ImportSection(state: LauncherState, onPickMinecraft: () -> Unit) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Game files", style = MaterialTheme.typography.titleLarge)
             Text(
-                "Point Horizon at your .minecraft folder: the pinned jars are imported and " +
-                    "checked, the client JAR's resources extracted and the asset store copied — " +
-                    "all on the phone, and only the pinned version's files (its libraries and " +
-                    "its asset index's sounds, fonts, languages and packs), not every " +
-                    "version's. The ${"server-"}${HorizonNative.pinnedVersion()}.jar (minecraft.net → " +
-                    "download server jar) goes into the same folder.",
+                "Point Horizon at your .minecraft folder: the client jar is checked " +
+                    "(sha1 against the lock), its resources extracted and the asset store " +
+                    "copied — all on the phone, and only the pinned version's files (its " +
+                    "libraries and its asset index's sounds, fonts, languages and packs), " +
+                    "not every version's. No server jar is needed — the three tag tables " +
+                    "a desktop derives from it arrive with the portable export.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -313,10 +313,33 @@ private fun ImportProgress(state: LauncherState) {
     if (import.running) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                "Importing… ${import.bytes / (1 shl 20)} MB${import.currentFile.take(40).let { if (it.isBlank()) "" else " — $it" }}",
+                buildString {
+                    append(import.phase.ifBlank { "Importing" })
+                    append(" — ${import.bytes / (1 shl 20)} MB")
+                    import.totalBytes?.let { total -> append(" of ${total / (1 shl 20)} MB") }
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
-            LinearProgressIndicator(Modifier.fillMaxWidth())
+            import.currentFile.take(40).let {
+                if (it.isNotBlank()) {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            // The on-device prepare's latest line (it runs for minutes and
+            // reports through events; this is "where it is" right now).
+            state.validationLog.lastOrNull()?.let { line ->
+                Text(
+                    line.take(72),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            import.totalBytes?.let { total ->
+                LinearProgressIndicator(
+                    progress = { (import.bytes.toFloat() / total).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } ?: LinearProgressIndicator(Modifier.fillMaxWidth())
         }
     } else if (import.error != null) {
         Text(
@@ -324,6 +347,27 @@ private fun ImportProgress(state: LauncherState) {
             color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodySmall,
         )
+    } else if (import.doneMessage != null) {
+        Text(
+            "✓ ${import.doneMessage}",
+            color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (state.validationLog.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                state.validationLog.takeLast(3).forEach { line ->
+                    Text(
+                        line.take(72),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (line.startsWith("result:")) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
+        }
     } else if (state.validationLog.isNotEmpty()) {
         // The on-device prepare's progress lines (it runs for minutes).
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -349,11 +393,25 @@ private fun ReadySection(state: LauncherState) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Ready", style = MaterialTheme.typography.titleLarge)
             if (!state.usable) {
+                val fromMinecraft = state.missing.any { it == "assets/" || it == "data/" }
+                val fromExport = state.missing.any { it != "assets/" && it != "data/" }
                 Text(
-                    "Resources incomplete — ${state.missing.size} item(s) missing: the Java-25 " +
-                        "exporter tables Android cannot run. Import a portable export once " +
-                        "(any ${HorizonNative.pinnedVersion()} export works) to finish; after " +
-                        "that, re-prepares never need it again.",
+                    buildString {
+                        append("Resources incomplete — ${state.missing.size} item(s) missing. ")
+                        if (fromMinecraft) {
+                            append(
+                                "assets/ and data/ come from the client jar — import your " +
+                                    ".minecraft folder to produce them. "
+                            )
+                        }
+                        if (fromExport) {
+                            append(
+                                "The Java-25 exporter tables Android cannot run — import a " +
+                                    "portable export once (any ${HorizonNative.pinnedVersion()} export works); " +
+                                    "after that, re-prepares never need it again."
+                            )
+                        }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )

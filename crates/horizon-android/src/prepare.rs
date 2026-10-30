@@ -3,10 +3,9 @@
 //!
 //! horizon-prepare's pipeline is two kinds of steps:
 //!
-//! * **file steps** — importing and checking the pinned jars, extracting the
-//!   client JAR's `assets/` + `data/` + `pack.png`, copying the asset store's
-//!   sounds and overlays, the reference tag/damage bundles. Pure Rust; they
-//!   run here, on the phone.
+//! * **file steps** — checking the pinned client jar, extracting its `assets/` +
+//!   `data/` + `pack.png`, copying the asset store's sounds and overlays. Pure
+//!   Rust; they run here, on the phone.
 //! * **exporter steps** — the behaviour/render tables (`facts.json`,
 //!   `model-states.json`, `cached-collision.nbt`, `gameplay-facts.json`, …)
 //!   produced by JVM code that calls Mojang's own classes, pinned to Java 25.
@@ -15,6 +14,14 @@
 //!   arrive through a **one-time portable-export import** — any export of
 //!   the pinned version works, because the tables are deterministic outputs
 //!   of the pinned jars.
+//!
+//!   The three reference tables a desktop build derives from the server jar
+//!   (`block-tags.json`, `damage-types.json`, `damage-tags.json`) are exporter
+//!   output in the same sense: they arrive with the export, never from a
+//!   server jar here. This path reads no server jar at all — asking a
+//!   no-PC player to fetch one from minecraft.net was a desktop assumption
+//!   that made the whole prepare fail before the client-JAR extraction
+//!   (hence "assets/ and data/ missing") had even started.
 //!
 //! Preparation is incremental (a step is skipped while its inputs and
 //! outputs are unchanged), so the tables only ever have to be imported
@@ -27,15 +34,16 @@
 //!
 //! ```text
 //! prepare-root/research-lock.json                written from this build's copy
-//! prepare-root/.local/minecraft/<version>/       imported, verified jars (artifacts)
+//! prepare-root/.local/minecraft/<version>/       horizon-prepare's working dir
+//!                                                 (the version json the sound
+//!                                                 steps re-import; no jars)
 //! prepare-root/.local/horizon-client/<version>/  THE prepared root = --resources;
 //!                                                 the portable-export import writes
 //!                                                 the same directory
 //! minecraft-staging/                             the SAF-copied .minecraft:
-//!                                                 versions/<version>/, the
+//!                                                 versions/<version>/ and the
 //!                                                 pinned version's slice of
-//!                                                 assets/ and libraries/,
-//!                                                 the server jar
+//!                                                 assets/ and libraries/
 //! ```
 //!
 //! Kotlin stages the `.minecraft` (SAF is unreachable from Rust) and then
@@ -44,18 +52,17 @@
 //!
 //! Storage cost of the no-PC path, for the docs: staging holds the pinned
 //! version's slice of the .minecraft (the libraries its version json names,
-//! its asset index's sounds, fonts, languages and packs) plus the two jars,
-//! the prepared root adds the extracted JAR resources plus the ~380 MB of
-//! sound objects, and `.local/minecraft/<version>` keeps another copy of the
-//! jars for the importer's checks. A full install lands around 2 GB on the
+//! its asset index's sounds, fonts, languages and packs) plus the client
+//! jar, and the prepared root adds the extracted JAR resources plus the
+//! ~380 MB of sound objects. A full install lands around 2 GB on the
 //! device.
 
 use std::fs;
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
-use horizon_prepare::artifacts::{self, Lock};
+use horizon_prepare::artifacts::Lock;
 use horizon_prepare::pyjson::{self, Value};
 
 /// research-lock.json as shipped by this build: the single source of truth
@@ -151,29 +158,33 @@ pub fn prepare_from_minecraft(
         ));
     }
 
-    // Imported, verified artifacts. import() is idempotent: an already
-    // verified copy is kept as-is, so re-runs only copy what changed.
-    let server_jar = find_server_jar(&lock, &staging);
-    if server_jar.is_none() {
-        log(&format!(
-            "no {version} server jar in the import yet — trying the previously imported copy \
-             (put server-{version}.jar from minecraft.net into the .minecraft folder if this \
-             is a first import)"
+    // The client jar, checked against the lock. This is the one file the
+    // whole device-side prepare is built on; no server jar is read, wanted
+    // or mentioned on this path (its only consumers, the reference tag/damage
+    // tables, are exporter output the portable export carries).
+    let client = staging
+        .join("versions")
+        .join(&version)
+        .join(format!("{version}.jar"));
+    if !client.is_file() {
+        return Err(format!(
+            "the imported folder has no versions/{version}/{version}.jar — Horizon is pinned \
+             to Minecraft {version}"
         ));
     }
-    log("Importing and checking the pinned jars (sha1 against research-lock.json)");
-    artifacts::import(
-        &prepare_root,
-        &lock,
-        Some(&staging),
-        server_jar.as_deref(),
-        log,
-    )?;
-    let found = artifacts::verify(&lock)?;
-    let client = found.jars["client"].clone();
-    // jars["server"] is the bundle's unpacked inner game jar — what the
-    // reference bundles are read from, same as the desktop run.
-    let server = found.jars["server"].clone();
+    let pinned_client = lock_pin(&lock, "client_sha1")?;
+    match sha1_of(&client) {
+        Ok(digest) if digest == pinned_client => {}
+        Ok(_) => {
+            return Err(format!(
+                "versions/{version}/{version}.jar does not match the pinned release (sha1): a \
+                                 modified jar, or another build saved under that name. Horizon plays \
+                                 Mojang's own {version} client jar only"
+            ))
+        }
+        Err(e) => return Err(e),
+    }
+    log(&format!("Checked {version}.jar against research-lock.json (sha1)"));
 
     fs::create_dir_all(&resources).map_err(|e| format!("{}: {e}", resources.display()))?;
 
@@ -194,17 +205,24 @@ pub fn prepare_from_minecraft(
     horizon_prepare::packs(&prepare_root, Some(&staging), log)?;
     horizon_prepare::languages(&prepare_root, Some(&staging), log)?;
 
-    // Reference bundles straight from the jars, server cross-checked against
-    // client — the exact shapes horizon-prepare's steps write.
-    log("Writing the reference block-tag and damage bundles");
-    let block_tags = jar_bundle(&server, &client, "data/minecraft/tags/block/")?;
-    write_json(&resources.join("block-tags.json"), &block_tags)?;
-    for (file, prefix) in [
-        ("damage-types.json", "data/minecraft/damage_type/"),
-        ("damage-tags.json", "data/minecraft/tags/damage_type/"),
-    ] {
-        let bundle = jar_bundle(&server, &client, prefix)?;
-        write_json(&resources.join(file), &bundle)?;
+    // The reference tables a desktop build derives from the server jar. Here
+    // they are deterministic outputs the portable export carries: when the
+    // export already delivered them they are kept exactly as written (the
+    // same compose rule as the manifest below); when one is missing it joins
+    // report.missing and the launcher points at the one-time export import.
+    let tables = ["block-tags.json", "damage-types.json", "damage-tags.json"];
+    let absent: Vec<&str> = tables
+        .iter()
+        .copied()
+        .filter(|table| !resources.join(table).is_file())
+        .collect();
+    if absent.is_empty() {
+        log("The reference tag/damage tables are in place (kept as the portable export wrote them)");
+    } else {
+        log(&format!(
+            "The reference table(s) {} are left for the one-time portable-export import",
+            absent.join(", ")
+        ));
     }
 
     // The manifest. Start from the previous one so every exporter entry a
@@ -232,7 +250,6 @@ pub fn prepare_from_minecraft(
     set("schema", Value::Int(SCHEMA.to_string()));
     set("minecraft", Value::str(&version));
     set("client_sha256", Value::Str(sha256_of(&client)?));
-    set("server_sha256", Value::Str(sha256_of(&server)?));
     set(
         "data_version",
         jar_version
@@ -241,10 +258,18 @@ pub fn prepare_from_minecraft(
             .ok_or("the client JAR's version.json has no world_version")?,
     );
     set("resource_files", Value::Int(resource_files.to_string()));
-    set(
-        "block_tags_sha256",
-        Value::Str(sha256_of(&resources.join("block-tags.json"))?),
-    );
+    // block_tags_sha256: only when the table is actually there (the export's
+    // or a previous run's); never a value this path cannot compute.
+    if resources.join("block-tags.json").is_file() {
+        set(
+            "block_tags_sha256",
+            Value::Str(sha256_of(&resources.join("block-tags.json"))?),
+        );
+    }
+    // server_sha256: this path never reads a server jar, so it is left as
+    // the previous manifest had it (the portable export's run had one); a
+    // first-run manifest simply omits the field — nothing at play time or in
+    // inspect() reads it.
     write_json(&manifest_path, &Value::Object(manifest))?;
 
     let inspection = inspect(&resources);
@@ -359,7 +384,6 @@ fn ensure_research_lock(prepare_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A sha1 pin from the lock (Lock::pin is crate-private in horizon-prepare).
 fn lock_pin(lock: &Lock, key: &str) -> Result<String, String> {
     lock.json
         .get("minecraft")
@@ -367,72 +391,6 @@ fn lock_pin(lock: &Lock, key: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("research-lock.json has no minecraft {key}"))
-}
-
-/// Every *.jar that could be the pinned server jar: the .minecraft root
-/// (where "drop the server jar in the folder" tells the player to put it)
-/// and the version dir (the client jar is there too; the sha1 check sorts
-/// them out). Names containing "server" are hashed first so the big client
-/// jar is only hashed when nothing else matched.
-fn find_server_jar(lock: &Lock, staging: &Path) -> Option<PathBuf> {
-    let pin = lock_pin(lock, "server_sha1").ok()?;
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for dir in [
-        staging.join("versions").join(&lock.version),
-        staging.to_path_buf(),
-    ] {
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().is_some_and(|ext| ext == "jar") {
-                    candidates.push(path);
-                }
-            }
-        }
-    }
-    candidates.sort_by_key(|jar| {
-        !jar.file_name()
-            .map(|name| name.to_string_lossy().to_lowercase().contains("server"))
-            .unwrap_or(false)
-    });
-    candidates
-        .into_iter()
-        .find(|jar| sha1_of(jar).is_ok_and(|digest| digest == pin))
-}
-
-/// `{prefix}<path>.json` members of both jars as `{"minecraft:<path>": text}`,
-/// server cross-checked against client — upstream's json_resources, replicated
-/// locally because horizon-prepare keeps it crate-private.
-fn jar_bundle(server: &Path, client: &Path, prefix: &str) -> Result<Value, String> {
-    let from_server = zip_json_bundle(server, prefix)?;
-    let from_client = zip_json_bundle(client, prefix)?;
-    if from_server != from_client {
-        return Err(format!(
-            "Reference bundle disagrees between the jars: {prefix}"
-        ));
-    }
-    Ok(from_server)
-}
-
-fn zip_json_bundle(jar: &Path, prefix: &str) -> Result<Value, String> {
-    let file = fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar.display()))?;
-    let mut names: Vec<String> = (0..archive.len())
-        .filter_map(|index| archive.name_for_index(index).map(str::to_string))
-        .filter(|name| name.starts_with(prefix) && name.ends_with(".json"))
-        .collect();
-    names.sort();
-    let mut bundle = Value::Object(Vec::new());
-    for name in names {
-        let mut entry = archive.by_name(&name).map_err(|e| format!("{name}: {e}"))?;
-        let mut text = String::with_capacity(entry.size() as usize);
-        entry
-            .read_to_string(&mut text)
-            .map_err(|e| format!("{name}: {e}"))?;
-        let key = format!("minecraft:{}", &name[prefix.len()..name.len() - 5]);
-        bundle.insert(&key, Value::Str(text));
-    }
-    Ok(bundle)
 }
 
 /// horizon-prepare's write_json (crate-private there): two-space indent,

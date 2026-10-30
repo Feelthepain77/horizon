@@ -27,7 +27,7 @@ import org.json.JSONObject
  *                       the portable-export import write the same directory,
  *                       so the two paths compose.
  * files/minecraft-staging/  the SAF-copied .minecraft: versions/<version>,
- *                       the server jar, and of assets/ and libraries/ only
+ *                       and of assets/ and libraries/ only
  *                       the pinned version's slice (its asset index and the
  *                       objects the prepare reads, the libraries its version
  *                       json names); saves/ is copied into the game home.
@@ -69,13 +69,18 @@ object StorageLayout {
     fun importsDir(context: Context): File = File(context.filesDir, "imports")
 }
 
-/** Progress of a running import. `totalBytes == null` when the size is unknown. */
+/** Progress of a running import. `totalBytes == null` when the size is
+ *  unknown (indeterminate bar). `phase` names the current stage; `doneMessage`
+ *  is set when a run finished cleanly, so the UI can say it is done and what
+ *  (if anything) is still missing. */
 data class ImportState(
     val running: Boolean = false,
     val bytes: Long = 0,
     val totalBytes: Long? = null,
     val currentFile: String = "",
+    val phase: String = "",
     val error: String? = null,
+    val doneMessage: String? = null,
 )
 
 /**
@@ -143,13 +148,15 @@ class GameFilesManager(private val context: Context) {
 
     /**
      * Import the player's own .minecraft folder — the no-PC path. Stages the
-     * parts the prepare reads (the pinned version's dir, assets, libraries,
-     * root-level jars that may be the server jar; saves into the game home),
-     * then runs the on-device prepare in Rust. Progress lines from the
-     * prepare arrive as `prepare` events on HorizonNative.events.
+     * parts the prepare reads (the pinned version's dir, its asset index and
+     * the objects the prepare copies, the libraries its version json names;
+     * saves into the game home), then runs the on-device prepare in Rust —
+     * with the phase set at each step, so the UI can show a determinate bar
+     * and say when it is done. Progress lines from the prepare arrive as
+     * `prepare` events on HorizonNative.events.
      */
     suspend fun importFromMinecraft(uri: Uri): Unit = withContext(Dispatchers.IO) {
-        _importState.value = ImportState(running = true)
+        _importState.value = ImportState(running = true, phase = "Looking for your .minecraft")
         try {
             val resolver = context.contentResolver
             val root = findMinecraftRoot(resolver, uri, 0)
@@ -158,7 +165,12 @@ class GameFilesManager(private val context: Context) {
                         "assets/, searched three levels deep)"
                 )
             stageMinecraft(resolver, root)
-            _importState.value = _importState.value.copy(running = false)
+            _importState.value = _importState.value.copy(
+                running = true,
+                bytes = 0,
+                phase = "Preparing resources on device",
+                currentFile = "",
+            )
 
             // Hand off to Rust; the report says what (if anything) is left.
             val report = parseReport(
@@ -166,7 +178,21 @@ class GameFilesManager(private val context: Context) {
             )
             lastReport = report
             if (report?.error != null) {
-                _importState.value = ImportState(error = report.error)
+                _importState.value = _importState.value.copy(
+                    running = false, phase = "", error = report.error, doneMessage = null,
+                )
+            } else {
+                val done = report?.let { r ->
+                    if (r.ok) {
+                        "Resources ready — PLAY is unlocked"
+                    } else {
+                        "Prepared the file steps; still missing: ${r.missing.joinToString(", ")} — " +
+                            "import a portable export once to finish"
+                    }
+                } ?: "Import finished"
+                _importState.value = _importState.value.copy(
+                    running = false, phase = "", currentFile = "", doneMessage = done,
+                )
             }
         } catch (e: Exception) {
             coroutineContext.ensureActive()
@@ -175,11 +201,17 @@ class GameFilesManager(private val context: Context) {
     }
 
     /** Copy the parts of a .minecraft the prepare reads into the staging dir:
-     *  the pinned version's own dir and jars, its asset index and the objects
-     *  the prepare copies from it, the libraries its version json names, and
-     *  the worlds. Other versions' objects and libraries, logs, screenshots,
-     *  mods and resourcepacks stay behind — a multi-version .minecraft can
-     *  hold gigabytes the pinned version never reads. */
+     *  the pinned version's own dir, its asset index and the objects the
+     *  prepare copies from it, the libraries its version json names, and the
+     *  worlds. Other versions' objects and libraries, logs, screenshots, mods
+     *  and resourcepacks stay behind — a multi-version .minecraft can hold
+     *  gigabytes the pinned version never reads. No jar is staged besides the
+     *  client jar inside versions/<version>/ (the prepare reads no server jar).
+     *
+     *  The stage is measured before the copy begins — the version json
+     *  declares the jar's size, the index declares every object's, the json
+     *  names the libraries — so the progress bar is determinate from the
+     *  first byte. */
     private fun stageMinecraft(resolver: android.content.ContentResolver, root: Uri) {
         val staging = StorageLayout.minecraftStaging(context)
         _importState.value = _importState.value.copy(currentFile = "clearing the previous stage")
@@ -199,22 +231,56 @@ class GameFilesManager(private val context: Context) {
             ?: fail("the .minecraft has no versions/ directory")
         val versionDir = childDir(resolver, versions, version)
             ?: fail("the .minecraft has no versions/$version — Horizon is pinned to Minecraft $version")
-        copyDocumentTree(resolver, versionDir, File(File(staging, "versions"), version), onBytes)
-        val manifest = runCatching {
-            JSONObject(File(File(File(staging, "versions"), version), "$version.json").readText())
-        }.getOrNull() ?: fail("versions/$version/$version.json is unreadable")
 
-        stageAssets(resolver, root, manifest, onBytes)
-        stageLibraries(resolver, root, manifest, onBytes)
-
-        // Root-level jars: the server jar the player dropped in (Rust's sha1
-        // check against research-lock.json sorts the candidates out).
-        for (child in SafUtil.listChildren(resolver, root)) {
-            val name = SafUtil.displayName(resolver, child) ?: continue
-            if (name.endsWith(".jar") && !SafUtil.isDirectory(resolver, child)) {
-                copyDocumentTree(resolver, child, File(staging, name), onBytes)
+        // Measure what the stage will hold: two small SAF reads (the version
+        // json, the asset index) plus one size query per save file, then the
+        // bar is determinate for the whole copy.
+        _importState.value = _importState.value.copy(currentFile = "measuring the .minecraft")
+        val versionJsonDoc = childDocumentAt(resolver, versionDir, "$version.json")
+        val manifest = versionJsonDoc?.let { doc ->
+            runCatching {
+                resolver.openInputStream(doc)!!.bufferedReader().use { it.readText() }
+            }.getOrNull()?.let { JSONObject(it) }
+        } ?: fail("versions/$version/$version.json is unreadable")
+        var total = 0L
+        total += manifest.optJSONObject("downloads")?.optJSONObject("client")?.optLong("size") ?: 0L
+        total += versionJsonDoc?.let { SafUtil.size(resolver, it) } ?: 0L
+        val assetsDir = childDir(resolver, root, "assets")
+        if (assetsDir != null) {
+            val indexId = manifest.optJSONObject("assetIndex")?.optString("id").orEmpty()
+            if (indexId.isNotEmpty()) {
+                childDocumentAt(resolver, assetsDir, "indexes/$indexId.json")?.let { indexDoc ->
+                    total += SafUtil.size(resolver, indexDoc)
+                    runCatching {
+                        JSONObject(
+                            resolver.openInputStream(indexDoc)!!.bufferedReader().use { it.readText() }
+                        )
+                    }.getOrNull()?.optJSONObject("objects")?.let { objects ->
+                        for (name in objects.keys()) {
+                            if (isWantedAsset(name)) {
+                                total += objects.optJSONObject(name)?.optLong("size") ?: 0L
+                            }
+                        }
+                    }
+                }
             }
         }
+        val libraries = manifest.optJSONArray("libraries")
+        for (index in 0 until (libraries?.length() ?: 0)) {
+            total += libraries?.optJSONObject(index)
+                ?.optJSONObject("downloads")?.optJSONObject("artifact")?.optLong("size") ?: 0L
+        }
+        childDir(resolver, root, "saves")?.let { saves -> total += SafUtil.treeSize(resolver, saves) }
+        _importState.value = _importState.value.copy(
+            phase = "Staging your .minecraft",
+            totalBytes = total.takeIf { it > 0 },
+            bytes = 0,
+            currentFile = "",
+        )
+
+        copyDocumentTree(resolver, versionDir, File(File(staging, "versions"), version), onBytes)
+        stageAssets(resolver, root, manifest, onBytes)
+        stageLibraries(resolver, root, manifest, onBytes)
 
         // saves → the game home, so the worlds come along.
         StorageLayout.homeDir(context).mkdirs()
@@ -249,19 +315,9 @@ class GameFilesManager(private val context: Context) {
             JSONObject(stagedIndex.readText()).optJSONObject("objects")
         }.getOrNull() ?: return
 
-        // Which index entries the prepare reads (sounds.rs: is_sound,
-        // is_language, is_font, is_built_in_pack, is_panorama).
-        fun wanted(name: String) = name == "minecraft/sounds.json" ||
-            name.startsWith("minecraft/sounds/") ||
-            name == "pack.mcmeta" ||
-            name.startsWith("minecraft/lang/") ||
-            name.startsWith("minecraft/font/") ||
-            name.startsWith("minecraft/resourcepacks/") ||
-            PANORAMA.contains(name)
-
         val hashes = ArrayList<String>()
         for (name in entries.keys()) {
-            if (wanted(name)) {
+            if (isWantedAsset(name)) {
                 val hash = entries.optJSONObject(name)?.optString("hash").orEmpty()
                 if (hash.length == 40) hashes.add(hash)
             }
@@ -433,10 +489,15 @@ class GameFilesManager(private val context: Context) {
      * downloaded just works.
      */
     suspend fun importFromZip(uri: Uri): Unit = withContext(Dispatchers.IO) {
-        _importState.value = ImportState(running = true)
+        _importState.value = ImportState(running = true, phase = "Importing the portable export")
         try {
             importZipLevel({ context.contentResolver.openInputStream(uri)!! }, "the zip", 0)
-            _importState.value = _importState.value.copy(running = false)
+            _importState.value = _importState.value.copy(
+                running = false,
+                phase = "",
+                doneMessage = "Portable export imported (${_importState.value.bytes / (1 shl 20)} MB) — " +
+                    "re-validate to update the checklist",
+            )
         } catch (e: Exception) {
             coroutineContext.ensureActive() // rethrow cancellation as-is
             _importState.value = ImportState(error = e.message ?: e.javaClass.simpleName)
@@ -523,7 +584,7 @@ class GameFilesManager(private val context: Context) {
      * rejected with a clear message.
      */
     suspend fun importFromTree(uri: Uri): Unit = withContext(Dispatchers.IO) {
-        _importState.value = ImportState(running = true)
+        _importState.value = ImportState(running = true, phase = "Importing the export folder")
         try {
             val resolver = context.contentResolver
             // The directory holding the manifest is the prepared root; copy
@@ -535,7 +596,11 @@ class GameFilesManager(private val context: Context) {
                 copied += bytes
                 _importState.value = _importState.value.copy(bytes = copied, currentFile = file)
             }
-            _importState.value = _importState.value.copy(running = false)
+            _importState.value = _importState.value.copy(
+                running = false,
+                phase = "",
+                doneMessage = "Portable export imported (${copied / (1 shl 20)} MB)",
+            )
         } catch (e: Exception) {
             coroutineContext.ensureActive()
             _importState.value = ImportState(error = e.message ?: e.javaClass.simpleName)
@@ -626,6 +691,18 @@ private val PANORAMA = setOf(
     "minecraft/textures/gui/title/background/panorama_overlay.png",
 )
 
+/** Which index entries the prepare copies from the asset store (sounds.rs's
+ *  filters — keep in sync): the sounds, the languages, Unifont, the built-in
+ *  packs and the title panorama. One definition, used by the staging copy and
+ *  by the up-front measurement alike. */
+private fun isWantedAsset(name: String): Boolean = name == "minecraft/sounds.json" ||
+    name.startsWith("minecraft/sounds/") ||
+    name == "pack.mcmeta" ||
+    name.startsWith("minecraft/lang/") ||
+    name.startsWith("minecraft/font/") ||
+    name.startsWith("minecraft/resourcepacks/") ||
+    PANORAMA.contains(name)
+
 /** SAF (Storage Access Framework) helpers built on DocumentsContract. */
 object SafUtil {
     private val projection = arrayOf(
@@ -694,5 +771,33 @@ object SafUtil {
             }
         }
         return false
+    }
+
+    /** A document's size in bytes (0 when the provider reports nothing). */
+    fun size(resolver: android.content.ContentResolver, uri: Uri): Long {
+        val docId = DocumentsContract.getDocumentId(uri)
+        val docUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
+        resolver.query(
+            docUri,
+            arrayOf(DocumentsContract.Document.COLUMN_SIZE),
+            null, null, null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) return cursor.getLong(0)
+        }
+        return 0L
+    }
+
+    /** The bytes under a SAF directory tree — one size query per file, no
+     *  data read. Used for the saves slice of the staging measurement. */
+    fun treeSize(resolver: android.content.ContentResolver, dir: Uri): Long {
+        var total = 0L
+        for (child in listChildren(resolver, dir)) {
+            if (isDirectory(resolver, child)) {
+                total += treeSize(resolver, child)
+            } else {
+                total += size(resolver, child)
+            }
+        }
+        return total
     }
 }

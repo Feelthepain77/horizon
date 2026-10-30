@@ -313,14 +313,14 @@ engineering, store-policy friction).
 * **On-device, on the phone** (`crates/horizon-android/src/prepare.rs` +
   `GameFilesManager.importFromMinecraft`): the launcher asks for the player's
   `.minecraft` **on launch** (no PC in the loop), SAF-stages the parts the
-  prepare reads (`versions/<version>/`, `assets/`, `libraries/`, root-level
-  jars; `saves/` is copied into the game home), then Rust imports and verifies
-  the pinned jars (sha1 against research-lock.json), extracts the client JAR's
-  `assets/` + `data/` + `pack.png`, copies the asset store's sounds and the
-  panorama/Unifont/built-in-pack/language overlays, and writes the reference
-  block-tag and damage bundles. The server jar (`server-<version>.jar`,
-  minecraft.net → download server jar, any browser) must sit in the picked
-  folder.
+  prepare reads (`versions/<version>/`, the pinned version's slice of
+  `assets/` and `libraries/`; `saves/` is copied into the game home), then
+  Rust checks the client jar (sha1 against research-lock.json), extracts its
+  `assets/` + `data/` + `pack.png`, and copies the asset store's sounds and
+  the panorama/Unifont/built-in-pack/language overlays. **No server jar is
+  read or wanted** — the three reference tables a desktop derives from it
+  (`block-tags.json`, `damage-types.json`, `damage-tags.json`) are exporter
+  output and arrive with the portable export like every other table.
 * **Once, from anywhere** — the Java-25 exporter tables arrive through a
   **portable export** import (a zip or folder containing the prepared root
   marked by `horizon-resources.json`; produce it by preparing on any desktop
