@@ -44,3 +44,7 @@ android/local.properties
 android/app/src/main/jniLibs/
 *.keystore
 *.jks
+# ...except the committed debug keystore: CI's per-run random one made every
+# APK uninstall-only (uninstalling wipes the prepared files and the saves).
+# See android/app/build.gradle.kts, signingConfigs.committedDebug.
+!android/app/debug.keystore

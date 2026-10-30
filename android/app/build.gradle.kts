@@ -29,9 +29,26 @@ android {
         compose = true
     }
 
+    signingConfigs {
+        // A committed debug keystore: CI runners generate a fresh random one
+        // per run, so every APK would otherwise be signed differently and
+        // refuse to install over the previous build — and the only way out
+        // is uninstalling, which wipes the prepared files, the staged
+        // .minecraft and the saves. Same well-known credentials as a local
+        // debug build; replace with a real key before any distribution.
+        create("committedDebug") {
+            storeFile = project.file("debug.keystore")
+            storeType = "PKCS12"
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         debug {
             isJniDebuggable = true
+            signingConfig = signingConfigs.getByName("committedDebug")
         }
         release {
             isMinifyEnabled = false
