@@ -59,8 +59,10 @@ bytemuck = { version = "1", features = ["derive"] }
 [target.'cfg(target_os = "android")'.dependencies]
 # Must match the jni version used by android-activity 0.6 (via winit) so
 # Env/JavaVM types interoperate.
+# (android_logger deliberately absent: the client's own file logger —
+# crates/horizon-client-render/src/logging.rs, started from client.rs — owns
+# the log facade; two loggers cannot share one process.)
 jni = "0.22"
-android_logger = "0.15"
 
 [profile.release]
 # The Horizon workspace sets lto = "thin", codegen-units = 1 for release;

@@ -14,6 +14,7 @@ import dev.horizon.android.game.HorizonNative
 import dev.horizon.android.setup.ImportState
 import dev.horizon.android.setup.StorageLayout
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -79,6 +80,16 @@ class LauncherState(
     var validationLog: List<String> by mutableStateOf(emptyList())
         private set
 
+    /** The tail of the last game run's log, or the head of its crash report
+     *  when it wrote one. `logs/latest.log` is rolled at every start, so it
+     *  is always the most recent run; the crash reports are dated files.
+     *  Empty until the game has run once. Written from Rust's side too: a
+     *  `game` event with an `error:` payload arrives the moment the client
+     *  dies, and this list is refreshed from disk when the launcher comes
+     *  back to the foreground. */
+    var lastGameRun: List<String> by mutableStateOf(emptyList())
+        private set
+
     /** True when the prepared root passed the play-time inspection (all
      *  exporter tables present) — the gate for the PLAY button. Set from the
      *  inspection's synchronous return value (never from events — before the
@@ -122,11 +133,23 @@ class LauncherState(
                         validationLog = (validationLog + event.payload).takeLast(12)
                         if (event.payload.startsWith("result:")) refreshFiles()
                     }
+                    "game" -> {
+                        // The game session just ended. An error line says why
+                        // (it also goes to the crash report on disk); refresh
+                        // the last-run panel from the files either way, since
+                        // the report carries the full story.
+                        if (event.payload.startsWith("error:")) {
+                            validationLog = (validationLog + event.payload).takeLast(12)
+                        }
+                        refreshAfterGame()
+                    }
                 }
             }
         }
         // Show the current state (usable / what is missing) right at launch.
         if (files.hasPrepared()) validate()
+        // And why the last game run ended, if there was one.
+        refreshAfterGame()
     }
 
     fun signIn(activity: android.app.Activity) = scope.launch { auth.signIn(activity) }
@@ -193,6 +216,35 @@ class LauncherState(
         validationLog = emptyList()
         missing = emptyList()
         usable = false
+    }
+
+    /** Re-read the last game run's log/crash report. Called when the game
+     *  activity goes away (the launcher resumes behind it), when a `game`
+     *  event arrives, and once at launch. */
+    fun refreshAfterGame() {
+        scope.launch(Dispatchers.IO) { lastGameRun = readLastGameRun() }
+    }
+
+    /** The newest client crash report (its head — the error and its stack
+     *  lead), else the tail of the last session's `logs/latest.log`. */
+    private fun readLastGameRun(): List<String> {
+        val home = StorageLayout.homeDir(context)
+        val crash = home.resolve("crash-reports")
+            .listFiles()
+            ?.filter { it.isFile && it.name.startsWith("crash-") && it.name.endsWith("-client.txt") }
+            ?.maxByOrNull { it.lastModified() }
+        if (crash != null) {
+            // The report opens with a comment, the time and the description,
+            // then the error with its stack — the head carries the reason.
+            val head = crash.useLines { lines -> lines.take(16).toList() }
+            return listOf("crash report — ${crash.name}") + head
+        }
+        val log = home.resolve("logs").resolve("latest.log")
+        if (log.isFile) {
+            val tail = log.useLines { lines -> lines.toList().takeLast(14) }
+            return listOf("log tail of the last game run:") + tail
+        }
+        return emptyList()
     }
 
     /**

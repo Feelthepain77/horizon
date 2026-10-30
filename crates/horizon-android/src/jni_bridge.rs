@@ -47,7 +47,12 @@ pub fn launch_configuration() -> LaunchConfiguration {
 
 /// Progress events back to Kotlin. Fire-and-forget: failures log but never
 /// propagate (an event glitch must not kill a 40-minute import).
-fn emit_event(kind: &str, payload: &str) {
+///
+/// Event types Kotlin currently handles: `validate`, `prepare`, and `game`
+/// (a `game` event with an `error:` payload is the client's fatal error,
+/// emitted just before `android_main` returns — the launcher shows it and
+/// refreshes its "Last game run" panel from the log/crash report on disk).
+pub(crate) fn emit_event(kind: &str, payload: &str) {
     let Some(vm) = JAVA_VM.get() else { return };
     let Some(class) = EVENT_CLASS.get() else {
         return;

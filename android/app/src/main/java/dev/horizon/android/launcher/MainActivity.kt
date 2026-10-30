@@ -33,6 +33,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -44,9 +45,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import dev.horizon.android.R
 import dev.horizon.android.auth.AuthState
 import dev.horizon.android.game.HorizonNative
@@ -92,6 +97,18 @@ private fun LauncherScreen() {
         }
     LaunchedEffect(Unit) {
         if (!state.hasPrepared) minecraftPicker.launch(null)
+    }
+
+    // Returning from the game activity (it finishes when the client exits):
+    // re-read the last run's log and crash report so the panel below says
+    // why it ended, not why some earlier run did.
+    DisposableEffect(Unit) {
+        val owner = context as? LifecycleOwner
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) state.refreshAfterGame()
+        }
+        owner?.lifecycle?.addObserver(observer)
+        onDispose { owner?.lifecycle?.removeObserver(observer) }
     }
 
     Column(
@@ -458,6 +475,28 @@ private fun ReadySection(state: LauncherState) {
                             color = if (line.startsWith("ok") || line.startsWith("result:usable")) {
                                 MaterialTheme.colorScheme.primary
                             } else if (line.startsWith("missing")) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                }
+            }
+            if (state.lastGameRun.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        "Last game run",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
+                    state.lastGameRun.take(16).forEach { line ->
+                        Text(
+                            line,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = if (line.contains("error", ignoreCase = true) ||
+                                line.contains("panicked", ignoreCase = true)) {
                                 MaterialTheme.colorScheme.error
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant

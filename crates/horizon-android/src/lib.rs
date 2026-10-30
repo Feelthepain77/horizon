@@ -69,11 +69,12 @@ use winit::window::{Window, WindowId};
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: crate::AndroidApp) {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_tag("horizon")
-            .with_max_level(log::LevelFilter::Info),
-    );
+    // No android_logger here: `log::set_logger` accepts one logger per
+    // process, and the client's own file logger (started in `client::launch`)
+    // must be that one — it writes <home>/logs/latest.log, which the launcher
+    // reads back as the "Last game run" panel. Horizon's log lines also go
+    // to stderr, which a debuggable build mirrors into logcat anyway.
+    // (The demo shell's lines only reach logcat on desktop debug runs.)
     log::info!(
         "horizon-android {} (rustc {}) starting",
         env!("CARGO_PKG_VERSION"),

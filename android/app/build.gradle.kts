@@ -84,6 +84,10 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.kotlinx.coroutines.android)
+    // The launcher's ON_RESUME observer (Last game run refresh). Explicit, not
+    // transitive: activity-compose and MSAL both ship it, but their POMs are
+    // not a contract.
+    implementation(libs.androidx.lifecycle.runtime)
 
     // MSAL BrowserTabActivity is an AppCompatActivity subclass.
     implementation(libs.androidx.appcompat)

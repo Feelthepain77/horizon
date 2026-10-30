@@ -83,7 +83,7 @@ Key decisions:
 | `nativeValidateGameFiles(dir): Boolean` | `..._nativeValidateGameFiles` | play-time inspection, emits `validate` events |
 | `nativePinnedVersion(): String` | `..._nativePinnedVersion` | the MC version research-lock.json pins |
 | `nativePrepareFromMinecraft(root): String` | `..._nativePrepareFromMinecraft` | on-device prepare; emits `prepare` events, returns the report JSON |
-| `onNativeEvent(json)` (static) | `emit_event` | called from Rust worker threads |
+| `onNativeEvent(json)` (static) | `emit_event` | called from Rust worker threads; types: `validate`, `prepare`, `game` (an `error:` payload is the client's fatal error, sent just before `android_main` returns) |
 
 Keep the two files in lockstep. The JSON contract is serde-driven
 (`LaunchConfiguration` in `lib.rs`) so new fields don't need new JNI surface.
@@ -518,9 +518,17 @@ and `auth.rs` in the client (the parser).
 
 ## 12. Debugging & profiling
 
-* **logcat:** `adb logcat -s horizon` — all Rust logging goes through
-  `android_logger` with the `horizon` tag. Panics print with backtraces if
-  you build with `RUST_BACKTRACE=1` equivalent (`ndk-stack` below).
+* **The game's own log (first place to look):** the shell starts the client's
+  vanilla-format file log — `<game home>/logs/latest.log` (rolled at every
+  start, so it is always the most recent session) — and its crash reporter,
+  `<game home>/crash-reports/crash-<date>-client.txt` for a panic or a fatal
+  error. The launcher's **Last game run** panel reads both back on the
+  device, no adb needed. `android_logger` is deliberately gone: the log
+  facade accepts one logger per process, and the file logger must be that
+  one (a debuggable build still mirrors Horizon's own lines into logcat via
+  stderr).
+* **logcat:** `adb logcat` — stderr of a debuggable build lands there; the
+  client's fatal errors also arrive live in the launcher as `game` events.
 * **Symbolized native crashes:**
   ```sh
   adb logcat -b crash

@@ -6,6 +6,10 @@ agp = "9.5.0"
 kotlin = "2.4.21"
 activityCompose = "1.13.0"
 composeBom = "2026.09.00"
+# The launcher's resume observer (MainActivity's "Last game run" refresh);
+# declared explicitly rather than leaned on transitively (activity-compose
+# and MSAL both pull it, but their POMs are not a contract).
+lifecycleRuntime = "2.11.0"
 coroutines = "1.11.0"
 appcompat = "1.8.0"
 msal = "8.6.0"
@@ -20,6 +24,7 @@ androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "u
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 androidx-compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+androidx-lifecycle-runtime = { group = "androidx.lifecycle", name = "lifecycle-runtime", version.ref = "lifecycleRuntime" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 msal = { group = "com.microsoft.identity.client", name = "msal", version.ref = "msal" }
 
