@@ -80,11 +80,14 @@ class LauncherState(
         private set
 
     /** True when the prepared root passed the play-time inspection (all
-     *  exporter tables present) — the gate for the PLAY button. */
+     *  exporter tables present) — the gate for the PLAY button. Set from the
+     *  inspection's synchronous return value (never from events — before the
+     *  sink is cached those cannot fire, and the gate would deadlock). */
     var usable: Boolean by mutableStateOf(false)
         private set
 
-    /** What the last inspection found missing (file or directory names). */
+    /** What the last inspection found missing (file or directory names).
+     *  Same source as [usable]: the inspection's return value. */
     var missing: List<String> by mutableStateOf(emptyList())
         private set
 
@@ -107,20 +110,12 @@ class LauncherState(
             HorizonNative.events.collect { event ->
                 when (event.type) {
                     "validate" -> {
+                        // Progress lines only — the authoritative usable/
+                        // missing state comes from the inspection's return
+                        // value in validate(); never from events, which
+                        // cannot fire before the sink class is cached.
                         validationLog = (validationLog + event.payload).takeLast(12)
-                        if (event.payload.startsWith("missing:")) {
-                            missing = (missing + event.payload.substringAfter("missing:")).takeLast(30)
-                        }
-                        when (event.payload) {
-                            "result:usable" -> {
-                                usable = true
-                                refreshFiles()
-                            }
-                            "result:incomplete" -> {
-                                usable = false
-                                refreshFiles()
-                            }
-                        }
+                        if (event.payload.startsWith("result:")) refreshFiles()
                     }
                     "prepare" -> {
                         // progress lines from the on-device prepare; same pane
@@ -166,12 +161,28 @@ class LauncherState(
     }
 
     fun validate() {
-        if (!files.hasPrepared()) return
+        if (!files.hasPrepared()) {
+            // Nothing to inspect yet. Surface the last prepare report instead,
+            // so a failed prepare is never a silent "0 items missing".
+            files.lastReport?.let { report ->
+                usable = false
+                missing = report.missing
+                report.error?.let { err ->
+                    validationLog = listOf("error: ${err.take(200)}")
+                }
+            }
+            return
+        }
         scope.launch {
             validationLog = emptyList()
             missing = emptyList()
             usable = false
-            HorizonNative.validateGameFiles(StorageLayout.preparedDir(context).absolutePath)
+            // The synchronous return is the authority for the PLAY gate:
+            // whatever the prepared root holds, the UI reflects it now.
+            val inspection =
+                HorizonNative.validateGameFiles(StorageLayout.preparedDir(context).absolutePath)
+            usable = inspection.usable
+            missing = inspection.missing
             refreshFiles()
         }
     }

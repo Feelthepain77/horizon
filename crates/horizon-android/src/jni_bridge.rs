@@ -13,8 +13,14 @@
 //!    thread (app classloader active) we also cache a `Global<JClass>` for
 //!    the callback class — later `find_class` calls from native-attached
 //!    threads would otherwise hit the system classloader.
-//! 3. `nativeValidateGameFiles` runs on a Kotlin background thread and emits
-//!    progress via the static method `HorizonNative.onNativeEvent(String)`.
+//! 3. `HorizonNative.load()` calls `nativeInitEventSink` right after
+//!    `System.loadLibrary`, so the static callback `HorizonNative
+//!    .onNativeEvent(String)` is reachable from the first import on — the
+//!    event sink class is cached while the app classloader is active (the
+//!    main thread). `nativeConfigure` re-caches it; first one wins.
+//! 4. `nativeValidateGameFiles` runs on a Kotlin background thread and
+//!    *returns* the inspection as JSON, so the launcher's PLAY gate never
+//!    depends on the event path. Events remain as progress lines.
 //!
 //! Adding new entry points: keep them in `HorizonNative.kt` and here, with
 //! matching signatures. Prefer JSON strings over typed JNI for anything that
@@ -159,13 +165,55 @@ pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeGpuInfo
         .resolve_with::<LogContextErrorAndDefault, _>(|| "nativeGpuInfo".into())
 }
 
-/// `HorizonNative.nativeValidateGameFiles(preparedDir: String): Boolean`
+/// `HorizonNative.nativeInitEventSink(): Boolean`
+///
+/// Caches the event callback class as a global ref while the caller's
+/// classloader is active. `HorizonNative.load()` calls this on the app's
+/// main thread right after `System.loadLibrary`, so progress events flow
+/// from the very first import.
+///
+/// Before this existed the class was cached only inside `nativeConfigure`,
+/// which runs for the first time at the first game session — and the PLAY
+/// button that starts one was gated on `usable`, which only those events
+/// ever set. Nothing could fire, so the launcher was stuck on "resources
+/// incomplete, 0 items missing" forever, whatever was on disk.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeInitEventSink<
+    'caller,
+>(
+    mut unowned_env: jni::EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> jboolean {
+    if EVENT_CLASS.get().is_some() {
+        return jni::sys::JNI_TRUE;
+    }
+    let cached: jboolean = unowned_env
+        .with_env(|env| -> jni::errors::Result<jboolean> {
+            let class = env.find_class(jni_str!("dev/horizon/android/game/HorizonNative"))?;
+            let global = env.new_global_ref(&class)?;
+            let _ = EVENT_CLASS.set(global);
+            Ok(jni::sys::JNI_TRUE)
+        })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "nativeInitEventSink: caching event class".into()
+        });
+    if cached == jni::sys::JNI_FALSE {
+        log::warn!("event sink class not cached — progress events disabled");
+    }
+    cached
+}
+
+/// `HorizonNative.nativeValidateGameFiles(preparedDir: String): String`
 ///
 /// Inspection of the **prepared root** — the directory the client gets as
 /// `--resources` — against the play-time requirements (the manifest plus the
-/// exporter tables and spot files; see `prepare::REQUIRED_FILES`). Emits
-/// `validate` events (`ok:manifest`, `missing:<name>`, `result:usable` /
-/// `result:incomplete`) so the launcher can show exactly what is missing.
+/// exporter tables and spot files; see `prepare::REQUIRED_FILES`).
+///
+/// Returns the inspection as JSON, `{"usable": bool, "missing": [names]}` —
+/// the launcher applies that directly, so the PLAY gate never depends on the
+/// event path. The same information also arrives as `validate` events
+/// (`ok:manifest`, `missing:<name>`, `result:usable` / `result:incomplete`)
+/// for the progress pane.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeValidateGameFiles<
     'caller,
@@ -173,7 +221,7 @@ pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeValidat
     mut unowned_env: jni::EnvUnowned<'caller>,
     _class: JClass<'caller>,
     prepared_dir: JString<'caller>,
-) -> jboolean {
+) -> JString<'caller> {
     let dir: String = unowned_env
         .with_env(|env| -> jni::errors::Result<String> { prepared_dir.try_to_string(env) })
         .resolve_with::<LogContextErrorAndDefault, _>(|| {
@@ -189,16 +237,15 @@ pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeValidat
             emit_event("validate", &format!("missing:{name}"));
         }
     }
-    let usable = inspection.usable;
     emit_event(
         "validate",
-        if usable {
+        if inspection.usable {
             "result:usable"
         } else {
             "result:incomplete"
         },
     );
-    if usable {
+    if inspection.usable {
         log::info!("prepared resources at {dir} look usable");
     } else {
         log::warn!(
@@ -206,7 +253,16 @@ pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeValidat
             inspection.missing.len()
         );
     }
-    usable as jboolean
+    let json = serde_json::json!({
+        "usable": inspection.usable,
+        "missing": inspection.missing,
+    })
+    .to_string();
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<JString<'caller>> { Ok(env.new_string(&json)?) })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| {
+            "nativeValidateGameFiles: returning inspection".into()
+        })
 }
 
 /// `HorizonNative.nativePinnedVersion(): String` — the Minecraft version

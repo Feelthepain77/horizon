@@ -36,6 +36,16 @@ object HorizonNative {
             } catch (e: UnsatisfiedLinkError) {
                 false
             }
+            if (available) {
+                // Cache the event-sink class while this (main) thread and the
+                // app classloader are active — see nativeInitEventSink in
+                // jni_bridge.rs. Without this, no Rust→Kotlin event can fire
+                // before the first game session (nativeConfigure used to be
+                // the only cache point), and the launcher deadlocks on the
+                // PLAY gate. Best-effort: an older .so without the symbol
+                // still loads and plays without progress lines.
+                runCatching { nativeInitEventSink() }
+            }
             loaded = true
         }
     }
@@ -71,9 +81,29 @@ object HorizonNative {
         if (!available) "native library not loaded" else nativeGpuInfo()
     }
 
-    /** Structural validation of the imported game files; emits `validate` events. */
-    suspend fun validateGameFiles(gameDir: String): Boolean = withContext(Dispatchers.IO) {
-        if (!available) false else nativeValidateGameFiles(gameDir)
+    /** Result of the play-time inspection of the prepared root. */
+    data class Inspection(val usable: Boolean, val missing: List<String>)
+
+    /** Structural validation of the imported game files. Returns the
+     *  inspection synchronously — the PLAY gate is set from it directly, so
+     *  it never depends on the event path. Also emits `validate` events as
+     *  progress lines. */
+    suspend fun validateGameFiles(gameDir: String): Inspection = withContext(Dispatchers.IO) {
+        if (!available) {
+            Inspection(usable = false, missing = listOf("native library not loaded"))
+        } else {
+            runCatching {
+                val obj = JSONObject(nativeValidateGameFiles(gameDir))
+                val missing = buildList {
+                    obj.optJSONArray("missing")?.let { array ->
+                        for (index in 0 until array.length()) add(array.optString(index))
+                    }
+                }
+                Inspection(usable = obj.optBoolean("usable"), missing = missing)
+            }.getOrElse {
+                Inspection(usable = false, missing = listOf("validate failed: ${it.message}"))
+            }
+        }
     }
 
     /**
@@ -115,7 +145,8 @@ object HorizonNative {
     private external fun nativeConfigure(json: String): Boolean
     private external fun nativeGetVersion(): String
     private external fun nativeGpuInfo(): String
-    private external fun nativeValidateGameFiles(gameDir: String): Boolean
+    private external fun nativeInitEventSink(): Boolean
+    private external fun nativeValidateGameFiles(gameDir: String): String
     private external fun nativePinnedVersion(): String
     private external fun nativePrepareFromMinecraft(filesRoot: String): String
 
