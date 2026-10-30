@@ -257,18 +257,40 @@ verification during Phase 1 — treat them as the first week's checklist.
   in its lib.rs keeps its `use horizon_client::...` imports resolving), so
   `crates/horizon-android` can drive it from `android_main`, where there is
   no argv to read.
+* **The event loop needs the `AndroidApp`.** winit on Android only creates
+  an `EventLoop` from the handle `android_main` receives — a bare
+  `EventLoop::new()` panics there, which is why PLAY used to open a game
+  window that died instantly. `android_main` calls
+  `horizon_client::game::set_android_app(app.clone())` before
+  `client::launch`; the client's two loop creations (`run_loading`,
+  `run_event_loop`) go through `game.rs::event_loop()`, which builds from
+  that stored handle (a `Mutex<Option<_>>`, replaced on every activity
+  recreation — not a `OnceLock`, which would keep a dead handle). On every
+  other platform `event_loop()` is exactly `EventLoop::new()`.
 * `crates/horizon-android/src/client.rs` builds the launch: `HORIZON_HOME`
   + cwd = the game home, `HORIZON_TELEMETRY_URL=off`, then
   `--resources <prepared root>` (see SS 7), `--render-distance`,
   `--name`, `--session-file`. Without a prepared root it returns `Ok(false)`
   and the shell falls back to the demo renderer.
+* **Suspend/resume follows winit's Android contract** (`Resumed` == native
+  window available, `Suspended` == native window gone): both `Game` and the
+  loading screen drop their wgpu surface (`Renderer::drop_surface`, which
+  also clears the spare set aside for a successor) and their window on
+  `Suspended`, and rebuild both on `Resumed` on the same device — the
+  established graphics-settings-change rebuild path. A load that finishes
+  while suspended hands the game over without a renderer; `Game::resumed`
+  builds it on return. While suspended the tick loop parks on
+  `ControlFlow::Wait` instead of simulating headless. Held joystick keys
+  and touches are released at suspend (their lift events never come).
 * Touch input is translated inside the client (`game.rs`, cfg-gated
   `touch_input` + `Game::translate_touch`): touches become the desktop
   events the game already understands, so no other game logic is
   Android-aware. Keys go through `mapped_key` (the unified entry point the
   keyboard and controllers share) because winit's `KeyEvent` cannot be
   constructed outside winit; mouse-shaped events are constructed directly.
-  The gesture map is SS 8.
+  The gesture map is SS 8. The system Back key (winit delivers it as
+  `BrowserBack`; it has no physical code) maps to Escape: pause menu in
+  game, back out of screens.
 * The client is built `--no-default-features`: no audio (no ALSA on
   Android; sound is the cpal/Oboe workstream) and no controllers (gilrs has
   no Android backend; the touch overlay replaces them).
@@ -470,14 +492,25 @@ and `auth.rs` in the client (the parser).
 
 * `android_main` **can be called more than once per process** (activity
   recreation, e.g. foldables changing configuration despite
-  `configChanges`). All state is per-call; process-globals are `OnceLock`s.
-* On `suspended`: drop surface + window (done), then (client integration)
-  save the world and pause the tick loop. If the process is killed while
-  suspended, that save is your resume point.
-* Back button: with native-activity, key events arrive through winit's
-  `WindowEvent::KeyboardInput` on Android — map the back key to the pause
-  menu (don't exit the process). ⚠ Verify the exact scancode on-device in
-  Phase 1; it's the one input path the placeholder didn't exercise.
+  `configChanges`). All state is per-call; process-globals are `OnceLock`s
+  — except the client's `AndroidApp` handle, which the shell replaces via
+  `set_android_app` on every `android_main` (a `OnceLock` would keep the
+  dead previous handle).
+* On `suspended` (done, in the client): surface + window dropped
+  (`Renderer::drop_surface` + `window = None`), held touches/keys released,
+  tick loop parked on `ControlFlow::Wait`. On `resumed`: window + renderer
+  rebuilt on the same device. The world keeps running from memory across a
+  suspend; if the process is killed while suspended, the last autosave is
+  the resume point. The loader thread is not paused — a backgrounded load
+  finishes, and the handoff happens without a renderer if the window is
+  gone (`Game::resumed` builds it on return).
+* Back button: winit delivers Android's Back as `BrowserBack` (a named
+  key, no physical code); `Game::translate_touch` maps it to Escape — pause
+  menu in game, back out of screens — so it never exits the process.
+* Quitting the game: the title screen's Quit Game exits the event loop,
+  `run_with` returns, `android_main` returns, and the android-activity
+  glue calls `ANativeActivity_finish` — the user lands back in the
+  launcher.
 * Screen rotation: `userLandscape` + `configChanges` avoids activity
   recreation for orientation; resizes still arrive as `WindowEvent::Resized`.
 

@@ -178,9 +178,7 @@ pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeGpuInfo
 /// ever set. Nothing could fire, so the launcher was stuck on "resources
 /// incomplete, 0 items missing" forever, whatever was on disk.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeInitEventSink<
-    'caller,
->(
+pub extern "system" fn Java_dev_horizon_android_game_HorizonNative_nativeInitEventSink<'caller>(
     mut unowned_env: jni::EnvUnowned<'caller>,
     _class: JClass<'caller>,
 ) -> jboolean {

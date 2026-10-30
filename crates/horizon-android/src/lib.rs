@@ -79,6 +79,12 @@ fn android_main(app: crate::AndroidApp) {
         env!("CARGO_PKG_VERSION"),
         rustc_version()
     );
+    // winit on Android builds event loops only from the `AndroidApp` this
+    // function receives — the client's `EventLoop::new()` panics without it,
+    // which is why PLAY used to open a window that immediately died. Store
+    // it in the client before anything in its startup creates a loop. A
+    // clone: the demo shell below still needs the original.
+    horizon_client::game::set_android_app(app.clone());
     // The real client when the prepared files are there; the demo shell as
     // the fallback (no import yet, or an incomplete one).
     match client::launch(&launch_configuration()) {

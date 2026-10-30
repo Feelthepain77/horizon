@@ -2812,6 +2812,18 @@ impl Renderer {
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = self.surface.take();
     }
+    /// Drop the presentation surfaces outright, keeping the device. Android's
+    /// `Suspended` takes the native window away, and neither the surface nor
+    /// the spare set aside for a successor may outlive it: both wrap that
+    /// window. The next `Renderer::new` with `previous` builds a fresh one on
+    /// the new window, on this same device.
+    pub fn drop_surface(&mut self) {
+        self.surface = None;
+        *self
+            .spare_surface
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
     /// Reattach a window after surface loss or a failed renderer replacement.
     pub fn recreate_surface(&mut self) -> Result<()> {
         if self.offscreen.is_some() {

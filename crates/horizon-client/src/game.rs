@@ -13152,8 +13152,19 @@ impl Game<'_> {
     fn translate_touch(&mut self, raw: &WindowEvent) -> Option<Vec<WindowEvent>> {
         use winit::event::TouchPhase;
 
-        // Everything that is not a touch passes through.
+        // Everything that is not a touch passes through — except the system
+        // Back key (winit maps Android's KEYCODE_BACK to `BrowserBack`; it
+        // has no physical KeyCode): it acts as Escape, opening the pause
+        // menu in game and backing out of screens, like Back everywhere
+        // else on the platform.
         let WindowEvent::Touch(touch) = raw else {
+            if let WindowEvent::KeyboardInput { event, .. } = raw
+                && event.state == ElementState::Pressed
+                && event.logical_key
+                    == winit::keyboard::Key::Named(winit::keyboard::NamedKey::BrowserBack)
+            {
+                return Some(self.tap_key(KeyCode::Escape));
+            }
             return None;
         };
         let at = touch.location;
@@ -13402,6 +13413,32 @@ impl ApplicationHandler for Game<'_> {
         self.window = Some(window);
         self.apply_settings();
         self.previous = Instant::now();
+    }
+    /// The native window is gone (winit's Android `Suspended`): release the
+    /// surface and the window now — wgpu swapchains cannot outlive the
+    /// window they present to, and winit requires it dropped before resume.
+    /// `resumed` rebuilds both on the same device. Input state goes too: the
+    /// fingers and keys held when the window died would otherwise stay held
+    /// forever (no lift events ever arrive for them). Never fires elsewhere.
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.drop_surface();
+        }
+        self.window = None;
+        // Touch state (Android only): the fingers held when the window died
+        // never send their lift events.
+        #[cfg(target_os = "android")]
+        {
+            let held = std::mem::take(&mut self.android_touch.held);
+            for k in held {
+                let _ = self.mapped_key(k, false, false);
+            }
+            self.android_touch.joystick = None;
+            self.android_touch.look = None;
+            self.android_touch.parked = None;
+        }
+        self.physical_keys.clear();
+        self.physical_buttons.clear();
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, mut event: WindowEvent) {
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
@@ -14399,6 +14436,14 @@ impl ApplicationHandler for Game<'_> {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Android suspension: the window is gone until `resumed` rebuilds it.
+        // Nothing to tick, draw or poll — block on the OS (the resume
+        // command) instead of spinning the whole simulation headless in the
+        // background. Only Android ever gets here with no window.
+        if self.window.is_none() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         if horizon_threads::stop_requests() > 0
             && self.pending_save.as_ref().is_none_or(|save| !save.quit)
         {
@@ -15868,7 +15913,7 @@ fn leave_fullscreen_after(
 }
 
 fn run_event_loop(mut game: Game<'_>) -> Result<()> {
-    let result = EventLoop::new()?.run_app(&mut game);
+    let result = event_loop()?.run_app(&mut game);
     leave_fullscreen_after(&result, &mut game.settings);
     result?;
     horizon_client::discord_presence::stop();
@@ -15936,11 +15981,15 @@ impl Loading {
         };
         horizon_client::telemetry::note_display(&window);
         let offscreen = self.options.as_ref().is_some_and(|o| o.offscreen);
+        // `previous` keeps the device across an Android suspend/resume: the
+        // renderer kept its device when it dropped the dead window's surface,
+        // and this rebuild gives it a fresh one on the new window. Before the
+        // first resume there is no renderer, so this opens a device as before.
         match loading_renderer(
             window.clone(),
             offscreen,
             self.gui.as_ref(),
-            None,
+            self.renderer.as_ref(),
             self.settings.horizon.api,
         ) {
             Ok(r) => self.renderer = Some(r),
@@ -15952,6 +16001,16 @@ impl Loading {
         }
         horizon_client::hud::GUI_SCALE.store(self.settings.gui_scale, Ordering::Relaxed);
         self.window = Some(window);
+    }
+    /// The native window is gone (winit's Android `Suspended`): release the
+    /// surface and the window — wgpu swapchains cannot outlive the window —
+    /// keeping the renderer's device. `resumed` rebuilds both on that device.
+    /// The loader thread is untouched: it keeps loading in the background.
+    fn suspended(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.drop_surface();
+        }
+        self.window = None;
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, mut event: WindowEvent) {
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
@@ -16061,21 +16120,29 @@ impl Loading {
         options.world = None;
         options.server = None;
         let gui = self.gui.take().ok_or("missing menu bundle")?;
-        let window = self.window.clone().ok_or("window closed")?;
+        // Android: the window is gone while suspended (the user backgrounded
+        // the app mid-load; `Loading::suspended` dropped it). The handoff
+        // still happens — without a renderer — and `Game::resumed` builds the
+        // window and renderer when the user returns. Elsewhere the window is
+        // always here.
+        let window = self.window.clone();
         // Keep the loader's device and swap in the real textures in one step.
         if let Some(renderer) = &mut self.renderer {
             renderer.release_surface();
         }
         let renderer_at = Instant::now();
-        let renderer = build_renderer(
-            window.clone(),
-            options.offscreen,
-            &loaded.pack,
-            &gui,
-            self.renderer.as_ref(),
-            loaded.renderer_cpu,
-            self.settings.horizon.api,
-        )?;
+        let renderer = match window.clone() {
+            Some(window) => Some(build_renderer(
+                window,
+                options.offscreen,
+                &loaded.pack,
+                &gui,
+                self.renderer.as_ref(),
+                loaded.renderer_cpu,
+                self.settings.horizon.api,
+            )?),
+            None => None,
+        };
         log::info!(
             "Horizon: world renderer ready after {} ms",
             self.started.elapsed().as_millis()
@@ -16109,9 +16176,10 @@ impl Loading {
             return Ok(None);
         };
         let game_ms = game_at.elapsed().as_millis();
-        game.window = Some(window);
-        game.renderer = Some(renderer);
-        game.world_renderer_ready = true;
+        let renderer_ready = renderer.is_some();
+        game.window = window;
+        game.renderer = renderer;
+        game.world_renderer_ready = renderer_ready;
         game.fullscreen = self.fullscreen;
         game.panorama_rotation = self.panorama_rotation;
         self.menu.handoff(&mut game);
@@ -16138,6 +16206,15 @@ impl ApplicationHandler for App {
         match self {
             App::Loading(loading) => loading.resumed(event_loop),
             App::Ready(game) => game.resumed(event_loop),
+        }
+    }
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        // Android: the native window is gone; each half drops its surface and
+        // window (see Game::suspended / Loading::suspended), and `resumed`
+        // rebuilds them. Never fires elsewhere.
+        match self {
+            App::Loading(loading) => loading.suspended(),
+            App::Ready(game) => game.suspended(event_loop),
         }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -16253,7 +16330,7 @@ fn run_loading(
         error: None,
     };
     let mut app = App::Loading(Box::new(loading));
-    let result = EventLoop::new()?.run_app(&mut app);
+    let result = event_loop()?.run_app(&mut app);
     match &mut app {
         App::Ready(game) => leave_fullscreen_after(&result, &mut game.settings),
         App::Loading(loading) => leave_fullscreen_after(&result, &mut loading.settings),
@@ -16278,6 +16355,44 @@ fn run_loading(
 
 pub fn run() -> Result<()> {
     run_with(std::env::args().skip(1).collect())
+}
+
+/// winit on Android creates an event loop only from the `AndroidApp` that
+/// `android_main` receives — a bare `EventLoop::new()` panics there. The
+/// shell (`crates/horizon-android`) stores its handle here before
+/// [`run_with`]; on every other platform none of this exists.
+///
+/// A mutex, not a `OnceLock`: `android_main` runs again for every activity
+/// recreation in the same process, each time with a fresh `AndroidApp`, and
+/// the previous one must be replaced, not kept.
+#[cfg(target_os = "android")]
+static ANDROID_APP: std::sync::Mutex<Option<winit::platform::android::activity::AndroidApp>> =
+    std::sync::Mutex::new(None);
+
+/// Hand the client the `AndroidApp` winit passed to `android_main`. Android
+/// only; the shell calls it once per activity, before [`run_with`].
+#[cfg(target_os = "android")]
+pub fn set_android_app(app: winit::platform::android::activity::AndroidApp) {
+    *ANDROID_APP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(app);
+}
+
+/// The event loop every run shares: on Android built from the stored
+/// `AndroidApp` (see [`set_android_app`]), elsewhere a plain `EventLoop::new()`.
+fn event_loop() -> std::result::Result<EventLoop<()>, EventLoopError> {
+    #[cfg(target_os = "android")]
+    if let Some(app) = ANDROID_APP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        use winit::platform::android::EventLoopBuilderExtAndroid;
+        let mut builder = EventLoop::<()>::with_user_event();
+        builder.with_android_app(app);
+        return builder.build();
+    }
+    EventLoop::new()
 }
 
 /// The game started with host-provided arguments. Android's NativeActivity

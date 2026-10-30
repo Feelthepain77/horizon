@@ -180,11 +180,13 @@ pub fn prepare_from_minecraft(
                 "versions/{version}/{version}.jar does not match the pinned release (sha1): a \
                                  modified jar, or another build saved under that name. Horizon plays \
                                  Mojang's own {version} client jar only"
-            ))
+            ));
         }
         Err(e) => return Err(e),
     }
-    log(&format!("Checked {version}.jar against research-lock.json (sha1)"));
+    log(&format!(
+        "Checked {version}.jar against research-lock.json (sha1)"
+    ));
 
     fs::create_dir_all(&resources).map_err(|e| format!("{}: {e}", resources.display()))?;
 
@@ -217,7 +219,9 @@ pub fn prepare_from_minecraft(
         .filter(|table| !resources.join(table).is_file())
         .collect();
     if absent.is_empty() {
-        log("The reference tag/damage tables are in place (kept as the portable export wrote them)");
+        log(
+            "The reference tag/damage tables are in place (kept as the portable export wrote them)",
+        );
     } else {
         log(&format!(
             "The reference table(s) {} are left for the one-time portable-export import",
