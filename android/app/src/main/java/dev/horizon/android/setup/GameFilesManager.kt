@@ -359,9 +359,9 @@ class GameFilesManager(private val context: Context) {
         for ((index, part) in parts.withIndex()) {
             val last = index == parts.lastIndex
             current = SafUtil.listChildrenNamed(resolver, current)
-                .firstOrNull { (name, document) ->
+                .firstOrNull { (document, name) ->
                     name == part && (last || SafUtil.isDirectory(resolver, document))
-                }?.second ?: return null
+                }?.first ?: return null
         }
         return current
     }
