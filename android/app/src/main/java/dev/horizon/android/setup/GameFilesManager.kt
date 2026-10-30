@@ -27,9 +27,13 @@ import org.json.JSONObject
  *                       the portable-export import write the same directory,
  *                       so the two paths compose.
  * files/minecraft-staging/  the SAF-copied .minecraft: versions/<version>,
- *                       assets, libraries, the server jar; saves/ is copied
- *                       into the game home. Everything else (runtime, logs,
- *                       screenshots, mods, resourcepacks) stays behind.
+ *                       the server jar, and of assets/ and libraries/ only
+ *                       the pinned version's slice (its asset index and the
+ *                       objects the prepare reads, the libraries its version
+ *                       json names); saves/ is copied into the game home.
+ *                       Everything else (every other version's files,
+ *                       runtime, logs, screenshots, mods, resourcepacks)
+ *                       stays behind.
  * files/home/           the game home: cwd for the client run + HORIZON_HOME.
  *                       options.txt, saves/, logs/ and .horizon-cache are
  *                       created there by the client itself.
@@ -170,9 +174,16 @@ class GameFilesManager(private val context: Context) {
         }
     }
 
-    /** Copy the parts of a .minecraft the prepare reads into the staging dir. */
+    /** Copy the parts of a .minecraft the prepare reads into the staging dir:
+     *  the pinned version's own dir and jars, its asset index and the objects
+     *  the prepare copies from it, the libraries its version json names, and
+     *  the worlds. Other versions' objects and libraries, logs, screenshots,
+     *  mods and resourcepacks stay behind — a multi-version .minecraft can
+     *  hold gigabytes the pinned version never reads. */
     private fun stageMinecraft(resolver: android.content.ContentResolver, root: Uri) {
         val staging = StorageLayout.minecraftStaging(context)
+        _importState.value = _importState.value.copy(currentFile = "clearing the previous stage")
+        staging.deleteRecursively() // a fresh, selective stage: no wholesale leftovers
         staging.mkdirs()
         var copied = 0L
         val onBytes = { bytes: Long, file: String ->
@@ -180,23 +191,21 @@ class GameFilesManager(private val context: Context) {
             _importState.value = _importState.value.copy(bytes = copied, currentFile = file)
         }
 
-        // assets and libraries wholesale: the prepare reads the index and
-        // objects from assets; the importer verifies libraries against the
-        // version JSON.
-        for (name in listOf("assets", "libraries")) {
-            childDir(resolver, root, name)?.let { dir ->
-                copyDocumentTree(resolver, dir, File(staging, name), onBytes)
-            }
-        }
-
-        // The pinned version's dir (jar + json). A .minecraft without it gets
-        // a version-specific message from the prepare itself.
+        // The pinned version's dir (jar + json) first: its json says what
+        // else to copy. A .minecraft without it gets a version-specific
+        // message from the prepare itself.
         val version = HorizonNative.pinnedVersion()
         val versions = childDir(resolver, root, "versions")
             ?: fail("the .minecraft has no versions/ directory")
         val versionDir = childDir(resolver, versions, version)
             ?: fail("the .minecraft has no versions/$version — Horizon is pinned to Minecraft $version")
         copyDocumentTree(resolver, versionDir, File(File(staging, "versions"), version), onBytes)
+        val manifest = runCatching {
+            JSONObject(File(File(File(staging, "versions"), version), "$version.json").readText())
+        }.getOrNull() ?: fail("versions/$version/$version.json is unreadable")
+
+        stageAssets(resolver, root, manifest, onBytes)
+        stageLibraries(resolver, root, manifest, onBytes)
 
         // Root-level jars: the server jar the player dropped in (Rust's sha1
         // check against research-lock.json sorts the candidates out).
@@ -211,6 +220,99 @@ class GameFilesManager(private val context: Context) {
         StorageLayout.homeDir(context).mkdirs()
         childDir(resolver, root, "saves")?.let { dir ->
             copyDocumentTree(resolver, dir, File(StorageLayout.homeDir(context), "saves"), onBytes)
+        }
+    }
+
+    /**
+     * The pinned version's asset index and the objects the prepare copies
+     * from it (sounds.rs's filters — keep them in sync): the sounds, the
+     * languages, Unifont, the built-in packs and the title panorama. The
+     * rest of the store — every other version's objects, often most of it —
+     * stays behind. A missing index or assetIndex id is left for the prepare
+     * to report; its messages name the exact file.
+     */
+    private fun stageAssets(
+        resolver: android.content.ContentResolver,
+        root: Uri,
+        manifest: JSONObject,
+        onBytes: (Long, String) -> Unit,
+    ) {
+        val assetsDir = childDir(resolver, root, "assets") ?: return
+        val indexId = manifest.optJSONObject("assetIndex")?.optString("id").orEmpty()
+        if (indexId.isEmpty()) return
+        val stagedAssets = File(StorageLayout.minecraftStaging(context), "assets")
+        val stagedIndex = File(File(stagedAssets, "indexes"), "$indexId.json")
+        childDocumentAt(resolver, assetsDir, "indexes/$indexId.json")?.let { index ->
+            copyDocument(resolver, index, stagedIndex, onBytes)
+        }
+        val entries = runCatching {
+            JSONObject(stagedIndex.readText()).optJSONObject("objects")
+        }.getOrNull() ?: return
+
+        // Which index entries the prepare reads (sounds.rs: is_sound,
+        // is_language, is_font, is_built_in_pack, is_panorama).
+        fun wanted(name: String) = name == "minecraft/sounds.json" ||
+            name.startsWith("minecraft/sounds/") ||
+            name == "pack.mcmeta" ||
+            name.startsWith("minecraft/lang/") ||
+            name.startsWith("minecraft/font/") ||
+            name.startsWith("minecraft/resourcepacks/") ||
+            PANORAMA.contains(name)
+
+        val hashes = ArrayList<String>()
+        for (name in entries.keys()) {
+            if (wanted(name)) {
+                val hash = entries.optJSONObject(name)?.optString("hash").orEmpty()
+                if (hash.length == 40) hashes.add(hash)
+            }
+        }
+        // One listing per two-digit prefix of the store's objects/ — the
+        // layout the index's hashes address — copying only the wanted ones.
+        for ((prefix, group) in hashes.groupBy { it.substring(0, 2) }) {
+            val objectsDir = childDocumentAt(resolver, assetsDir, "objects/$prefix") ?: continue
+            val wantedHere = group.toHashSet()
+            for ((document, name) in SafUtil.listChildrenNamed(resolver, objectsDir)) {
+                if (name in wantedHere) {
+                    copyDocument(
+                        resolver,
+                        document,
+                        File(File(File(stagedAssets, "objects"), prefix), name),
+                        onBytes,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * The libraries the version json names — every `downloads.artifact` path,
+     * a superset of what the prepare imports (it also applies the json's OS
+     * and architecture rules). Each is copied at the path the official
+     * launcher uses, or where the Prism launcher keeps it (artifacts.rs
+     * launcher_library), so the prepare finds it in the stage either way.
+     */
+    private fun stageLibraries(
+        resolver: android.content.ContentResolver,
+        root: Uri,
+        manifest: JSONObject,
+        onBytes: (Long, String) -> Unit,
+    ) {
+        val librariesDir = childDir(resolver, root, "libraries") ?: return
+        val entries = manifest.optJSONArray("libraries") ?: return
+        val staged = File(StorageLayout.minecraftStaging(context), "libraries")
+        for (index in 0 until entries.length()) {
+            val library = entries.optJSONObject(index) ?: continue
+            val path = library.optJSONObject("downloads")
+                ?.optJSONObject("artifact")?.optString("path").orEmpty()
+            if (!isSafeRelative(path)) continue
+            val source = childDocumentAt(resolver, librariesDir, path)
+                ?: prismLibraryPath(library.optString("name"))
+                    ?.let { childDocumentAt(resolver, librariesDir, it) }
+                // A library absent from the player's install (one the json's
+                // rules leave out, a native their launcher never downloaded)
+                // is the prepare's to report if it needs it.
+                ?: continue
+            copyDocument(resolver, source, File(staged, path), onBytes)
         }
     }
 
@@ -243,6 +345,60 @@ class GameFilesManager(private val context: Context) {
         name: String,
     ): Uri? = SafUtil.listChildren(resolver, dir).firstOrNull {
         SafUtil.displayName(resolver, it) == name && SafUtil.isDirectory(resolver, it)
+    }
+
+    /** The document at [path] (segments joined by '/') under [dir], or null
+     *  when any segment is missing. Intermediate segments are directories. */
+    private fun childDocumentAt(
+        resolver: android.content.ContentResolver,
+        dir: Uri,
+        path: String,
+    ): Uri? {
+        var current = dir
+        val parts = path.split('/')
+        for ((index, part) in parts.withIndex()) {
+            val last = index == parts.lastIndex
+            current = SafUtil.listChildrenNamed(resolver, current)
+                .firstOrNull { (name, document) ->
+                    name == part && (last || SafUtil.isDirectory(resolver, document))
+                }?.second ?: return null
+        }
+        return current
+    }
+
+    /** A relative path with only normal components (artifacts.rs safe_relative). */
+    private fun isSafeRelative(path: String): Boolean =
+        path.isNotEmpty() && !path.contains('\\') && !path.startsWith("/") &&
+            path.split('/').none { it.isEmpty() || it == "." || it == ".." }
+
+    /** Where the Prism launcher keeps a native library: the classifier folded
+     *  into the artifact name (artifacts.rs launcher_library). */
+    private fun prismLibraryPath(name: String): String? {
+        val parts = name.split(':')
+        if (parts.size != 4) return null
+        val artifact = "${parts[1]}-${parts[3]}"
+        return "${parts[0].replace('.', '/')}/$artifact/${parts[2]}/$artifact-${parts[2]}.jar"
+    }
+
+    /** Copy one SAF document to [target]. */
+    private fun copyDocument(
+        resolver: android.content.ContentResolver,
+        document: Uri,
+        target: File,
+        onBytes: (Long, String) -> Unit,
+    ) {
+        target.parentFile?.mkdirs()
+        resolver.openInputStream(document)!!.use { input ->
+            target.outputStream().use { output ->
+                val buffer = ByteArray(1 shl 16)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    output.write(buffer, 0, read)
+                    onBytes(read.toLong(), target.name)
+                }
+            }
+        }
     }
 
     /** The report JSON from Rust (see jni_bridge.rs). */
@@ -424,18 +580,7 @@ class GameFilesManager(private val context: Context) {
                 )
             }
         } else {
-            targetDir.parentFile?.mkdirs()
-            resolver.openInputStream(document)!!.use { input ->
-                targetDir.outputStream().use { output ->
-                    val buf = ByteArray(1 shl 16)
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n <= 0) break
-                        output.write(buf, 0, n)
-                        onBytes(n.toLong(), targetDir.name)
-                    }
-                }
-            }
+            copyDocument(resolver, document, targetDir, onBytes)
         }
     }
 }
@@ -469,6 +614,18 @@ private fun java.util.zip.ZipInputStream.copyToWithProgress(
     }
 }
 
+/** The title panorama entries the prepare copies from the asset index
+ *  (sounds.rs PANORAMA — keep in sync). */
+private val PANORAMA = setOf(
+    "minecraft/textures/gui/title/background/panorama_0.png",
+    "minecraft/textures/gui/title/background/panorama_1.png",
+    "minecraft/textures/gui/title/background/panorama_2.png",
+    "minecraft/textures/gui/title/background/panorama_3.png",
+    "minecraft/textures/gui/title/background/panorama_4.png",
+    "minecraft/textures/gui/title/background/panorama_5.png",
+    "minecraft/textures/gui/title/background/panorama_overlay.png",
+)
+
 /** SAF (Storage Access Framework) helpers built on DocumentsContract. */
 object SafUtil {
     private val projection = arrayOf(
@@ -490,6 +647,30 @@ object SafUtil {
             while (cursor.moveToNext()) {
                 val id = cursor.getString(0)
                 out.add(DocumentsContract.buildDocumentUriUsingTree(treeUri, id))
+            }
+        }
+        return out
+    }
+
+    /** The children of a directory with their display names — one query. */
+    fun listChildrenNamed(
+        resolver: android.content.ContentResolver,
+        treeUri: Uri,
+    ): List<Pair<Uri, String>> {
+        val docId = try {
+            DocumentsContract.getDocumentId(treeUri)
+        } catch (_: IllegalArgumentException) {
+            DocumentsContract.getTreeDocumentId(treeUri)
+        }
+        val childrenUri =
+            DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+        val out = mutableListOf<Pair<Uri, String>>()
+        resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(0)
+                out.add(
+                    DocumentsContract.buildDocumentUriUsingTree(treeUri, id) to cursor.getString(1)
+                )
             }
         }
         return out

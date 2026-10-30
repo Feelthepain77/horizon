@@ -32,19 +32,23 @@
 //!                                                 the portable-export import writes
 //!                                                 the same directory
 //! minecraft-staging/                             the SAF-copied .minecraft:
-//!                                                 versions/<version>/, assets/,
-//!                                                 libraries/, the server jar
+//!                                                 versions/<version>/, the
+//!                                                 pinned version's slice of
+//!                                                 assets/ and libraries/,
+//!                                                 the server jar
 //! ```
 //!
 //! Kotlin stages the `.minecraft` (SAF is unreachable from Rust) and then
 //! calls [`prepare_from_minecraft`] on a background thread; everything below
 //! runs there.
 //!
-//! Storage cost of the no-PC path, for the docs: staging is the size of the
-//! player's `assets/` + `libraries/` + the two jars, the prepared root adds
-//! the extracted JAR resources plus the ~380 MB of sound objects, and
-//! `.local/minecraft/<version>` keeps another copy of the jars for the
-//! importer's checks. A full install lands around 2–2.5 GB on the device.
+//! Storage cost of the no-PC path, for the docs: staging holds the pinned
+//! version's slice of the .minecraft (the libraries its version json names,
+//! its asset index's sounds, fonts, languages and packs) plus the two jars,
+//! the prepared root adds the extracted JAR resources plus the ~380 MB of
+//! sound objects, and `.local/minecraft/<version>` keeps another copy of the
+//! jars for the importer's checks. A full install lands around 2 GB on the
+//! device.
 
 use std::fs;
 use std::io::Read as _;

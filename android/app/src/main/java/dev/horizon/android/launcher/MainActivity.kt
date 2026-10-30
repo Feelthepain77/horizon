@@ -179,7 +179,9 @@ private fun ImportSection(state: LauncherState, onPickMinecraft: () -> Unit) {
             Text(
                 "Point Horizon at your .minecraft folder: the pinned jars are imported and " +
                     "checked, the client JAR's resources extracted and the asset store copied — " +
-                    "all on the phone. The ${"server-"}${HorizonNative.pinnedVersion()}.jar (minecraft.net → " +
+                    "all on the phone, and only the pinned version's files (its libraries and " +
+                    "its asset index's sounds, fonts, languages and packs), not every " +
+                    "version's. The ${"server-"}${HorizonNative.pinnedVersion()}.jar (minecraft.net → " +
                     "download server jar) goes into the same folder.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
